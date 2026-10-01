@@ -1,51 +1,130 @@
-import { Sprite, Assets } from "pixi.js";
+import { Container, Sprite, Graphics, Texture } from "pixi.js";
+import { getGameTexture } from "../utils/textureUtils";
+
+export type EnemyType = "chaser" | "shooter";
 
 export class Enemy {
-  public container: Sprite;
-  private speed: number = 2;
-  public isDead: boolean = false;
-  public isDying: boolean = false;
-  private deathTimer: number = 30; // Duração do estado destruído em frames antes de sumir
+  public container: Container;
+  public sprite: Sprite;
+  public type: EnemyType;
+  public health: number;
+  public maxHealth: number;
+  public isDying = false;
+  public isDead = false;
 
-  constructor(textureName: string, startX: number, startY: number) {
-    this.container = Sprite.from(textureName);
-    this.container.anchor.set(0.5);
-    this.container.scale.set(0.35);
-    this.container.x = startX;
-    this.container.y = startY;
+  private healthBar: Container;
+  private healthFill: Graphics;
+  private attackCooldown = 0;
+
+  constructor(
+    type: EnemyType,
+    textureAlias: string,
+    x: number,
+    y: number,
+    health: number = 30,
+  ) {
+    this.type = type;
+    this.health = health;
+    this.maxHealth = health;
+
+    this.container = new Container();
+    this.container.x = x;
+    this.container.y = y;
+
+    // Busca de textura segura para o navio inimigo
+    const texture = getGameTexture(textureAlias);
+
+    this.sprite = new Sprite(texture);
+    this.sprite.anchor.set(0.5);
+    this.sprite.scale.set(0.55);
+    this.container.addChild(this.sprite);
+
+    // Barra de vida flutuante
+    this.healthBar = new Container();
+    this.healthBar.y = -40;
+
+    const bg = new Graphics();
+    bg.rect(-20, -3, 40, 6).fill(0x222222);
+    this.healthBar.addChild(bg);
+
+    this.healthFill = new Graphics();
+    this.healthBar.addChild(this.healthFill);
+    this.updateHealthBar();
+
+    this.container.addChild(this.healthBar);
   }
 
-  public triggerDeath() {
-    if (this.isDying) return;
-    this.isDying = true;
-    this.speed = 0; // Para de se mover imediatamente
-
-    // Substitui a textura pelo navio destruído/cinza (ship_21)
-    try {
-      this.container.texture = Assets.get("ship_destroyed");
-    } catch {
-      // Fallback caso a textura demore um instante
+  public takeDamage(amount: number) {
+    this.health = Math.max(0, this.health - amount);
+    this.updateHealthBar();
+    if (this.health <= 0 && !this.isDying) {
+      this.triggerDeath();
     }
   }
 
-  public update(playerX: number, playerY: number, delta: number) {
-    if (this.isDying) {
-      // Conta o tempo do navio afundando/destruído na tela antes de removê-lo
-      this.deathTimer -= delta;
-      if (this.deathTimer <= 0) {
-        this.isDead = true;
-      }
-      return;
-    }
+  private updateHealthBar() {
+    const ratio = this.health / this.maxHealth;
+    this.healthFill.clear();
+    const color = ratio > 0.5 ? 0x22c55e : ratio > 0.25 ? 0xeab308 : 0xef4444;
+    this.healthFill.rect(-19, -2, 38 * ratio, 4).fill(color);
+  }
+
+  public update(
+    playerX: number,
+    playerY: number,
+    delta: number,
+    onShoot?: (x: number, y: number, rotation: number) => void,
+  ) {
+    if (this.isDying || this.isDead) return;
 
     const dx = playerX - this.container.x;
     const dy = playerY - this.container.y;
+    const distance = Math.hypot(dx, dy);
+    const targetAngle = Math.atan2(dy, dx) - Math.PI / 2;
 
-    const targetAngle = Math.atan2(dy, dx);
+    this.container.rotation = targetAngle;
 
-    this.container.x += Math.cos(targetAngle) * this.speed * delta;
-    this.container.y += Math.sin(targetAngle) * this.speed * delta;
+    if (this.type === "chaser") {
+      const speed = 2.2;
+      this.container.x += Math.cos(targetAngle + Math.PI / 2) * speed * delta;
+      this.container.y += Math.sin(targetAngle + Math.PI / 2) * speed * delta;
+    } else if (this.type === "shooter") {
+      if (distance > 220) {
+        const speed = 1.5;
+        this.container.x += Math.cos(targetAngle + Math.PI / 2) * speed * delta;
+        this.container.y += Math.sin(targetAngle + Math.PI / 2) * speed * delta;
+      } else {
+        if (this.attackCooldown <= 0) {
+          if (onShoot) {
+            onShoot(
+              this.container.x,
+              this.container.y,
+              this.container.rotation,
+            );
+          }
+          this.attackCooldown = 90;
+        }
+      }
+    }
 
-    this.container.rotation = targetAngle + Math.PI / 2 + Math.PI;
+    if (this.attackCooldown > 0) {
+      this.attackCooldown -= delta;
+    }
+  }
+
+  public triggerDeath() {
+    this.isDying = true;
+
+    // Troca a textura para o navio destruído (ship_21.png)
+    const destroyedTexture = getGameTexture("ship_21");
+    if (destroyedTexture && destroyedTexture !== Texture.EMPTY) {
+      this.sprite.texture = destroyedTexture;
+    }
+
+    this.healthBar.visible = false;
+
+    setTimeout(() => {
+      this.isDead = true;
+    }, 600);
   }
 }

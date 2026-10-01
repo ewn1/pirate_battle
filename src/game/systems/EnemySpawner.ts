@@ -1,6 +1,8 @@
+import type { EnemyType } from "../entities/Enemy";
+
 export class EnemySpawner {
   private spawnTimer: number = 0;
-  private spawnInterval: number; // Em milissegundos
+  private spawnInterval: number;
 
   constructor(spawnIntervalMs: number) {
     this.spawnInterval = spawnIntervalMs;
@@ -10,9 +12,13 @@ export class EnemySpawner {
     delta: number,
     screenWidth: number,
     screenHeight: number,
-    onSpawn: (x: number, y: number) => void,
+    onSpawn: (
+      x: number,
+      y: number,
+      type: EnemyType,
+      textureAlias: string,
+    ) => void,
   ) {
-    // Converte delta de frames para milissegundos (considerando ~60fps)
     const msElapsed = (delta / 60) * 1000;
     this.spawnTimer += msElapsed;
 
@@ -25,13 +31,17 @@ export class EnemySpawner {
   private spawnEnemyAtRandomBorder(
     screenWidth: number,
     screenHeight: number,
-    onSpawn: (x: number, y: number) => void,
+    onSpawn: (
+      x: number,
+      y: number,
+      type: EnemyType,
+      textureAlias: string,
+    ) => void,
   ) {
     let x = 0;
     let y = 0;
     const side = Math.floor(Math.random() * 4);
 
-    // Sorteia uma das 4 bordas da tela para o inimigo nascer
     switch (side) {
       case 0: // Topo
         x = Math.random() * screenWidth;
@@ -51,6 +61,19 @@ export class EnemySpawner {
         break;
     }
 
-    onSpawn(x, y);
+    // Alterna o tipo de inimigo e associa aos assets oficiais do projeto
+    const isChaser = Math.random() > 0.4;
+    const type: EnemyType = isChaser ? "chaser" : "shooter";
+
+    // Chaser utiliza ship_2 ou ship_3 / Shooter utiliza ship_4 ou ship_5
+    const textureAlias = isChaser
+      ? Math.random() > 0.5
+        ? "ship_2"
+        : "ship_3"
+      : Math.random() > 0.5
+        ? "ship_4"
+        : "ship_5";
+
+    onSpawn(x, y, type, textureAlias);
   }
 }

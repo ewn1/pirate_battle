@@ -1,7 +1,11 @@
-import { Sprite } from "pixi.js";
+import { Container, Sprite } from "pixi.js";
+import { getGameTexture } from "../utils/textureUtils";
 
 export class Player {
-  public container: Sprite;
+  public container: Container;
+  public sprite: Sprite;
+  public health: number = 100;
+  public maxHealth: number = 100;
 
   private speed: number = 0;
   private maxSpeed: number = 5;
@@ -10,12 +14,23 @@ export class Player {
   private rotationSpeed: number = 0.05;
   private currentRotation: number = 0;
 
-  constructor(textureName: string, startX: number, startY: number) {
-    this.container = Sprite.from(textureName);
-    this.container.anchor.set(0.5);
-    this.container.scale.set(0.4);
+  constructor(textureAlias: string = "ship_1", startX: number, startY: number) {
+    this.container = new Container();
     this.container.x = startX;
     this.container.y = startY;
+
+    // Obtém a textura validada
+    const texture = getGameTexture(textureAlias);
+
+    this.sprite = new Sprite(texture);
+    this.sprite.anchor.set(0.5);
+    this.sprite.scale.set(0.6);
+
+    this.container.addChild(this.sprite);
+  }
+
+  public takeDamage(amount: number) {
+    this.health = Math.max(0, this.health - amount);
   }
 
   public update(
@@ -24,16 +39,10 @@ export class Player {
     screenHeight: number,
     delta: number,
   ) {
-    // Rotação (Girar para os lados)
-    if (input.left) {
-      this.currentRotation -= this.rotationSpeed * delta;
-    }
-    if (input.right) {
-      this.currentRotation += this.rotationSpeed * delta;
-    }
+    if (input.left) this.currentRotation -= this.rotationSpeed * delta;
+    if (input.right) this.currentRotation += this.rotationSpeed * delta;
     this.container.rotation = this.currentRotation;
 
-    // Aceleração para frente
     if (input.forward) {
       this.speed += this.acceleration * delta;
       if (this.speed > this.maxSpeed) this.speed = this.maxSpeed;
@@ -42,15 +51,10 @@ export class Player {
       if (this.speed < 0.01) this.speed = 0;
     }
 
-    // Como a proa do asset original aponta para baixo (oposto ao eixo padrão de cálculo -Math.PI/2),
-    // invertemos o vetor trigonométrico somando Math.PI. Desta forma, a proa do navio
-    // passará a liderar o movimento visualmente para frente.
     const movementAngle = this.currentRotation + Math.PI / 2;
-
     this.container.x += Math.cos(movementAngle) * this.speed * delta;
     this.container.y += Math.sin(movementAngle) * this.speed * delta;
 
-    // Limites da tela (Colisão com as bordas)
     const margin = 30;
     if (this.container.x < margin) this.container.x = margin;
     if (this.container.x > screenWidth - margin)
