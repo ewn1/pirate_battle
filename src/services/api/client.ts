@@ -4,6 +4,7 @@ import { QueryClient } from "@tanstack/react-query";
 // Instância padronizada do Axios
 export const api = axios.create({
   baseURL: "/api",
+  timeout: 5000,
 });
 
 // Instância global do gerenciador de estado assíncrono

@@ -6,6 +6,7 @@ import { EnemySpawner } from "../systems/EnemySpawner";
 import { InputManager } from "../utils/InputManager";
 import { checkCollision } from "../utils/Collision";
 import { DEFAULT_GAME_CONFIG, type GameConfig } from "../config/GameConfig";
+import { soundManager } from "../../services/audio/SoundManager";
 
 export interface GameCallbacks {
   onHealthChange?: (health: number, maxHealth: number) => void;
@@ -25,6 +26,46 @@ interface InputActions {
   fireBroadsideRight?: boolean;
 }
 
+export interface Island {
+  x: number;
+  y: number;
+  radius: number;
+}
+
+export function checkIslandCollision(
+  entityX: number,
+  entityY: number,
+  entityRadius: number,
+  island: Island,
+): boolean {
+  const dx = entityX - island.x;
+  const dy = entityY - island.y;
+  const distance = Math.sqrt(dx * dx + dy * dy);
+  return distance < entityRadius + island.radius;
+}
+
+export function resolveIslandCollision(
+  ship: { x: number; y: number; speed?: number; radius: number },
+  island: Island,
+) {
+  const dx = ship.x - island.x;
+  const dy = ship.y - island.y;
+  const distance = Math.sqrt(dx * dx + dy * dy);
+  const minDistance = ship.radius + island.radius;
+
+  if (distance < minDistance) {
+    const overlap = minDistance - distance;
+    const nx = dx / (distance || 1);
+    const ny = dy / (distance || 1);
+
+    ship.x += nx * overlap;
+    ship.y += ny * overlap;
+    if (ship.speed !== undefined) {
+      ship.speed = 0;
+    }
+  }
+}
+
 export class GameEngine {
   private app: Application;
   private player: Player | null = null;
@@ -39,6 +80,7 @@ export class GameEngine {
 
   private backgroundTile: TilingSprite | null = null;
   private islandSprite: Sprite | null = null;
+  private islandData: Island | null = null;
 
   private frontalCooldown: number = 0;
   private broadsideLeftCooldown: number = 0;
@@ -94,6 +136,7 @@ export class GameEngine {
 
     this.setupScene();
     this.setupEventListeners();
+    soundManager.playBGM();
     this.startGameLoop();
 
     this.callbacks.onHealthChange?.(
@@ -120,12 +163,14 @@ export class GameEngine {
   public pauseGame() {
     if (this.isGameOver || this.isPaused) return;
     this.isPaused = true;
+    soundManager.stopBGM();
     this.callbacks.onPauseChange?.(true);
   }
 
   public resumeGame() {
     if (this.isGameOver || !this.isPaused) return;
     this.isPaused = false;
+    soundManager.playBGM();
     this.callbacks.onPauseChange?.(false);
   }
 
@@ -137,21 +182,15 @@ export class GameEngine {
     }
   }
 
-  /**
-   * Mapeamento e pré-carregamento dos Assets via Bundle no PixiJS
-   */
   private async loadAssets() {
     try {
       const assetsToLoad = [
-        // Navios
         { alias: "ship_1", src: "/assets/png/default/ships/ship_1.png" },
         { alias: "ship_2", src: "/assets/png/default/ships/ship_2.png" },
         { alias: "ship_3", src: "/assets/png/default/ships/ship_3.png" },
         { alias: "ship_4", src: "/assets/png/default/ships/ship_4.png" },
         { alias: "ship_5", src: "/assets/png/default/ships/ship_5.png" },
         { alias: "ship_21", src: "/assets/png/default/ships/ship_21.png" },
-
-        // Partes e Efeitos
         {
           alias: "cannon_ball",
           src: "/assets/png/default/ship_parts/cannon_ball.png",
@@ -160,8 +199,6 @@ export class GameEngine {
           alias: "explosion_effect",
           src: "/assets/png/default/effects/explosion_1.png",
         },
-
-        // Cenário / Tiles
         { alias: "water_tile", src: "/assets/png/default/tiles/tile_73.png" },
         { alias: "island", src: "/assets/png/default/tiles/tile_16.png" },
       ];
@@ -199,12 +236,18 @@ export class GameEngine {
         this.islandSprite.x = this.app.screen.width / 2;
         this.islandSprite.y = this.app.screen.height / 2;
         this.app.stage.addChild(this.islandSprite);
+
+        this.islandData = {
+          x: this.islandSprite.x,
+          y: this.islandSprite.y,
+          radius:
+            Math.min(this.islandSprite.width, this.islandSprite.height) * 0.4,
+        };
       }
     } catch (e) {
       console.warn("Textura de ilha não encontrada.", e);
     }
 
-    // Corrigido: Usando o alias "ship_1" carregado no bundle
     this.player = new Player(
       "ship_1",
       this.app.screen.width / 4,
@@ -238,6 +281,34 @@ export class GameEngine {
       delta,
     );
 
+    // Resolução de Colisão: Jogador vs Ilha
+    if (this.islandData && this.player) {
+      const playerObj = {
+        x: this.player.container.x,
+        y: this.player.container.y,
+        speed: (this.player as unknown as { speed?: number }).speed || 0,
+        radius: 25,
+      };
+
+      if (
+        checkIslandCollision(
+          playerObj.x,
+          playerObj.y,
+          playerObj.radius,
+          this.islandData,
+        )
+      ) {
+        resolveIslandCollision(playerObj, this.islandData);
+        this.player.container.x = playerObj.x;
+        this.player.container.y = playerObj.y;
+        if (
+          (this.player as unknown as { speed?: number }).speed !== undefined
+        ) {
+          (this.player as unknown as { speed: number }).speed = playerObj.speed;
+        }
+      }
+    }
+
     if (this.backgroundTile) {
       this.backgroundTile.width = this.app.screen.width;
       this.backgroundTile.height = this.app.screen.height;
@@ -270,7 +341,6 @@ export class GameEngine {
       (x, y) => {
         const isChaser = Math.random() > 0.4;
         const type: EnemyType = isChaser ? "chaser" : "shooter";
-        // Corrigido: Mapeado para utilizar os aliases de navios pré-carregados
         const model = isChaser ? "ship_2" : "ship_3";
         const hp = isChaser
           ? this.config.chaserHealth
@@ -289,6 +359,60 @@ export class GameEngine {
         delta,
         (x, y, angle) => this.spawnEnemyProjectile(x, y, angle),
       );
+
+      // Resolução de Colisão: Inimigo vs Ilha
+      if (this.islandData) {
+        const enemyObj = {
+          x: enemy.container.x,
+          y: enemy.container.y,
+          speed: (enemy as unknown as { speed?: number }).speed || 0,
+          radius: 25,
+        };
+
+        if (
+          checkIslandCollision(
+            enemyObj.x,
+            enemyObj.y,
+            enemyObj.radius,
+            this.islandData,
+          )
+        ) {
+          resolveIslandCollision(enemyObj, this.islandData);
+          enemy.container.x = enemyObj.x;
+          enemy.container.y = enemyObj.y;
+        }
+      }
+    }
+
+    // Colisão: Projéteis do Jogador vs Ilha
+    if (this.islandData) {
+      for (let i = this.projectiles.length - 1; i >= 0; i--) {
+        const p = this.projectiles[i];
+        if (
+          checkIslandCollision(p.container.x, p.container.y, 5, this.islandData)
+        ) {
+          p.isDead = true;
+          this.createHitEffect(p.container.x, p.container.y);
+        }
+      }
+    }
+
+    // Colisão: Projéteis dos Inimigos vs Ilha
+    if (this.islandData) {
+      for (let i = this.enemyProjectiles.length - 1; i >= 0; i--) {
+        const ep = this.enemyProjectiles[i];
+        if (
+          checkIslandCollision(
+            ep.container.x,
+            ep.container.y,
+            5,
+            this.islandData,
+          )
+        ) {
+          ep.isDead = true;
+          this.createHitEffect(ep.container.x, ep.container.y);
+        }
+      }
     }
 
     // Colisão: Projéteis do Jogador vs Inimigos
@@ -301,10 +425,14 @@ export class GameEngine {
         if (!e.isDying && checkCollision(p.container, e.container, 35)) {
           p.isDead = true;
           e.takeDamage(25);
+          soundManager.playSFX("hit");
           this.createHitEffect(p.container.x, p.container.y);
 
-          if (e.health <= 0 && e.type === "shooter") {
-            this.addScore(100);
+          if (e.health <= 0) {
+            soundManager.playSFX("explosion");
+            if (e.type === "shooter") {
+              this.addScore(100);
+            }
           }
           break;
         }
@@ -317,6 +445,7 @@ export class GameEngine {
 
       if (checkCollision(ep.container, this.player.container, 30)) {
         ep.isDead = true;
+        soundManager.playSFX("hit");
         this.damagePlayer(this.config.shooterDamage);
         this.createHitEffect(ep.container.x, ep.container.y);
       }
@@ -332,6 +461,7 @@ export class GameEngine {
       ) {
         if (e.type === "chaser") {
           e.triggerDeath();
+          soundManager.playSFX("explosion");
           this.damagePlayer(this.config.chaserDamage);
           this.createHitEffect(e.container.x, e.container.y);
         }
@@ -409,6 +539,7 @@ export class GameEngine {
   private endGame(survived: boolean) {
     if (this.isGameOver) return;
     this.isGameOver = true;
+    soundManager.stopBGM();
     this.callbacks.onGameOver?.(this.score, survived);
   }
 
@@ -425,6 +556,7 @@ export class GameEngine {
 
   private fireFrontalCannon() {
     if (!this.player) return;
+    soundManager.playSFX("shoot");
     const projectile = this.createProjectileInstance(
       this.player.container.x,
       this.player.container.y,
@@ -437,6 +569,7 @@ export class GameEngine {
 
   private fireBroadsideCannon(side: "left" | "right") {
     if (!this.player) return;
+    soundManager.playSFX("shoot");
 
     const baseAngle =
       this.player.container.rotation +
@@ -463,6 +596,7 @@ export class GameEngine {
   }
 
   private spawnEnemyProjectile(x: number, y: number, angle: number) {
+    soundManager.playSFX("shoot");
     const projectile = this.createProjectileInstance(x, y, angle, true);
     this.enemyProjectiles.push(projectile);
     this.app.stage.addChild(projectile.container);
@@ -499,6 +633,7 @@ export class GameEngine {
 
   public destroy() {
     this.isDestroyed = true;
+    soundManager.stopBGM();
     this.removeEventListeners();
     this.inputManager.destroy();
 

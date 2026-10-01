@@ -60,24 +60,24 @@ export const Ranking = () => {
 
   return (
     <Panel>
-      <Title>Ranking Global</Title>
+      <Title>Leaderboard</Title>
 
-      {isLoading && <p>Carregando dados...</p>}
-      {isError && <p>Erro ao carregar o ranking.</p>}
+      {isLoading && <p>Loading leaderboard...</p>}
+      {isError && <p>Failed to load leaderboard data.</p>}
 
       {!isLoading && !isError && rankingData && (
         <Table>
           <thead>
             <tr>
-              <th>Posição</th>
-              <th>Pirata</th>
-              <th>Pontuação</th>
+              <th>Rank</th>
+              <th>Pirate</th>
+              <th>Score</th>
             </tr>
           </thead>
           <tbody>
             {rankingData.map((entry, index) => (
               <tr key={entry.id}>
-                <td>{index + 1}º</td>
+                <td>#{index + 1}</td>
                 <td>{entry.name}</td>
                 <td>{entry.score}</td>
               </tr>
@@ -86,7 +86,7 @@ export const Ranking = () => {
         </Table>
       )}
 
-      <Button onClick={() => navigate("/")}>Voltar</Button>
+      <Button onClick={() => navigate("/")}>Back</Button>
     </Panel>
   );
 };

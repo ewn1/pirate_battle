@@ -42,7 +42,11 @@ interface HistoryEntry {
 export const MatchHistory = () => {
   const navigate = useNavigate();
 
-  const { data: historyData, isLoading } = useQuery<HistoryEntry[]>({
+  const {
+    data: historyData,
+    isLoading,
+    isError,
+  } = useQuery<HistoryEntry[]>({
     queryKey: ["history"],
     queryFn: async () => {
       const response = await api.get("/history");
@@ -52,24 +56,25 @@ export const MatchHistory = () => {
 
   return (
     <Panel>
-      <Title>Histórico de Partidas</Title>
+      <Title>Match History</Title>
 
-      {isLoading ? (
-        <p>Carregando registro de batalhas...</p>
-      ) : (
+      {isLoading && <p>Loading battle log...</p>}
+      {isError && <p>Failed to load match history.</p>}
+
+      {!isLoading && !isError && historyData && (
         <Table>
           <thead>
             <tr>
-              <th>Data</th>
-              <th>Duração</th>
-              <th>Inimigos</th>
-              <th>Pontuação</th>
+              <th>Date</th>
+              <th>Duration</th>
+              <th>Enemies</th>
+              <th>Score</th>
             </tr>
           </thead>
           <tbody>
-            {historyData?.map((entry) => (
+            {historyData.map((entry) => (
               <tr key={entry.id}>
-                <td>{new Date(entry.date).toLocaleDateString("pt-BR")}</td>
+                <td>{new Date(entry.date).toLocaleDateString("en-US")}</td>
                 <td>{entry.duration}s</td>
                 <td>{entry.enemiesDefeated}</td>
                 <td>{entry.score}</td>
@@ -79,7 +84,7 @@ export const MatchHistory = () => {
         </Table>
       )}
 
-      <Button onClick={() => navigate("/")}>Voltar</Button>
+      <Button onClick={() => navigate("/")}>Back</Button>
     </Panel>
   );
 };

@@ -62,7 +62,6 @@ export const Options = () => {
   const { sessionTime, enemySpawnTime, setSessionTime, setEnemySpawnTime } =
     useGameStore();
 
-  // Estados locais para lidar com os inputs antes de salvar
   const [localSessionTime, setLocalSessionTime] = useState(
     sessionTime.toString(),
   );
@@ -75,14 +74,13 @@ export const Options = () => {
     const parsedSession = parseInt(localSessionTime, 10);
     const parsedSpawn = parseInt(localSpawnTime, 10);
 
-    // Regras de validação
     if (isNaN(parsedSession) || parsedSession < 60 || parsedSession > 180) {
-      setError("O tempo da partida deve estar entre 60 e 180 segundos.");
+      setError("Match duration must be between 60 and 180 seconds.");
       return;
     }
 
     if (isNaN(parsedSpawn) || parsedSpawn < 500) {
-      setError("O tempo de spawn deve ser de pelo menos 500ms.");
+      setError("Enemy spawn rate must be at least 500ms.");
       return;
     }
 
@@ -90,7 +88,6 @@ export const Options = () => {
     setSessionTime(parsedSession);
     setEnemySpawnTime(parsedSpawn);
 
-    // Voltar ao menu após salvar com sucesso
     navigate("/");
   };
 
@@ -102,10 +99,10 @@ export const Options = () => {
 
   return (
     <Panel onKeyDown={handleKeyDown}>
-      <Title>Opções</Title>
+      <Title>Options</Title>
 
       <InputGroup>
-        <Label htmlFor="sessionTime">Duração da Partida (Segundos)</Label>
+        <Label htmlFor="sessionTime">Match Duration (Seconds)</Label>
         <Input
           id="sessionTime"
           type="number"
@@ -119,7 +116,7 @@ export const Options = () => {
       </InputGroup>
 
       <InputGroup>
-        <Label htmlFor="spawnTime">Spawn de Inimigos (Milissegundos)</Label>
+        <Label htmlFor="spawnTime">Enemy Spawn Rate (ms)</Label>
         <Input
           id="spawnTime"
           type="number"
@@ -135,10 +132,10 @@ export const Options = () => {
 
       <ButtonGroup>
         <Button onClick={() => navigate("/")} tabIndex={4}>
-          Voltar
+          Back
         </Button>
         <Button onClick={handleSave} tabIndex={3}>
-          Salvar
+          Save
         </Button>
       </ButtonGroup>
     </Panel>
