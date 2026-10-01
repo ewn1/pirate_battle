@@ -1,12 +1,12 @@
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import styled from "styled-components";
-import { useMatchHistory } from "../hooks/useLeaderboard";
+import { useLeaderboard } from "../hooks/useLeaderboard";
 
-export const MatchHistory: React.FC = () => {
+export const LeaderboardView: React.FC = () => {
   const navigate = useNavigate();
   const [page, setPage] = useState(1);
-  const { data, isLoading, isError } = useMatchHistory(page, 5);
+  const { data, isLoading, isError } = useLeaderboard(page, 5);
 
   const items = data?.items || [];
   const totalPages = data?.totalPages || 1;
@@ -15,7 +15,7 @@ export const MatchHistory: React.FC = () => {
     <Container>
       <Panel>
         <Header>
-          <Title>MATCH HISTORY</Title>
+          <Title>CAPTAINS LEADERBOARD</Title>
           <BackButton onClick={() => navigate("/")}>
             <ButtonIcon
               src="/assets/png/default/ui/controls/icon_home.png"
@@ -25,9 +25,9 @@ export const MatchHistory: React.FC = () => {
           </BackButton>
         </Header>
 
-        {isLoading && <StatusText>Loading match records...</StatusText>}
+        {isLoading && <StatusText>Loading hall of fame...</StatusText>}
         {isError && (
-          <StatusText $error>Error fetching match history.</StatusText>
+          <StatusText $error>Error fetching leaderboard data.</StatusText>
         )}
 
         {!isLoading && !isError && (
@@ -36,22 +36,22 @@ export const MatchHistory: React.FC = () => {
               <Table>
                 <thead>
                   <tr>
-                    <Th>Date</Th>
+                    <Th>Rank</Th>
                     <Th>Captain</Th>
                     <Th>Score</Th>
-                    <Th>Duration</Th>
-                    <Th>Reason</Th>
+                    <Th>Time</Th>
+                    <Th>Outcome</Th>
                   </tr>
                 </thead>
                 <tbody>
                   {items.map((entry) => (
                     <tr key={entry.id}>
-                      <Td>{new Date(entry.createdAt).toLocaleDateString()}</Td>
+                      <Td $highlight={entry.rank <= 3}>#{entry.rank}</Td>
                       <Td>{entry.playerName}</Td>
                       <Td>{entry.score}</Td>
                       <Td>{entry.duration}s</Td>
                       <Td $survived={entry.survived}>
-                        {entry.reason || (entry.survived ? "Victory" : "Sunk")}
+                        {entry.survived ? "Survived" : "Sunk"}
                       </Td>
                     </tr>
                   ))}
@@ -82,10 +82,6 @@ export const MatchHistory: React.FC = () => {
     </Container>
   );
 };
-
-// Aliases para garantir compatibilidade com qualquer tipo de import no App.tsx
-export const MatchHistoryView = MatchHistory;
-export default MatchHistory;
 
 const Container = styled.div`
   width: 100vw;
@@ -190,16 +186,19 @@ const Th = styled.th`
   background-color: #1a110a;
 `;
 
-const Td = styled.td<{ $survived?: boolean }>`
+const Td = styled.td<{ $highlight?: boolean; $survived?: boolean }>`
   padding: 8px 12px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
   font-size: 13px;
   color: ${(props) =>
-    props.$survived !== undefined
-      ? props.$survived
-        ? "#81c784"
-        : "#e57373"
-      : "#fff"};
+    props.$highlight
+      ? "#f8e3a1"
+      : props.$survived !== undefined
+        ? props.$survived
+          ? "#81c784"
+          : "#e57373"
+        : "#fff"};
+  font-weight: ${(props) => (props.$highlight ? "bold" : "normal")};
 `;
 
 const PaginationContainer = styled.div`

@@ -5,6 +5,7 @@ import { GameEngine, type GameCallbacks } from "../game/core/GameEngine";
 import { PauseOverlay } from "../components/game/PauseOverlay";
 import { GameOverModal } from "../components/game/GameOverModal";
 import { TouchControls } from "../components/game/TouchControls";
+import { useSubmitScore } from "../hooks/useLeaderboard";
 
 export const GameView: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -22,6 +23,9 @@ export const GameView: React.FC = () => {
   const [survived, setSurvived] = useState(false);
 
   const [isMobile, setIsMobile] = useState(false);
+
+  // Hook de mutação via TanStack Query
+  const submitScoreMutation = useSubmitScore();
 
   useEffect(() => {
     const checkMobile = () => {
@@ -76,15 +80,18 @@ export const GameView: React.FC = () => {
   };
 
   const handleSubmitResult = (playerName: string) => {
-    console.log("Submitting match result:", { playerName, score, survived });
+    submitScoreMutation.mutate({
+      playerName,
+      score,
+      timePlayed: 120 - timeRemaining,
+      survived,
+    });
   };
 
   return (
     <GameContainer>
-      {/* Container PixiJS */}
       <PixiCanvasContainer ref={containerRef} />
 
-      {/* Tela de Loading */}
       {isLoading && (
         <LoadingScreen>
           <LoadingTitle>Loading Battleground...</LoadingTitle>
@@ -92,11 +99,9 @@ export const GameView: React.FC = () => {
         </LoadingScreen>
       )}
 
-      {/* HUD da Partida */}
       {!isLoading && (
         <HudContainer>
           <HudGroup>
-            {/* Painel de Vida */}
             <CounterBox>
               <HudIcon
                 src="/assets/png/default/ui/hud/icon_heart.png"
@@ -106,8 +111,6 @@ export const GameView: React.FC = () => {
                 {health} / {maxHealth}
               </span>
             </CounterBox>
-
-            {/* Painel de Pontuação */}
             <CounterBox>
               <HudIcon
                 src="/assets/png/default/ui/hud/icon_score.png"
@@ -117,7 +120,6 @@ export const GameView: React.FC = () => {
             </CounterBox>
           </HudGroup>
 
-          {/* Temporizador e Botão de Pausa */}
           <HudGroup $interactive>
             <CounterBox>
               <HudIcon
@@ -126,7 +128,6 @@ export const GameView: React.FC = () => {
               />
               <span>{timeRemaining}s</span>
             </CounterBox>
-
             <PauseButton onClick={handleTogglePause} aria-label="Pause Game">
               <HudIcon
                 src="/assets/png/default/ui/controls/icon_pause.png"
@@ -137,10 +138,8 @@ export const GameView: React.FC = () => {
         </HudContainer>
       )}
 
-      {/* Controles Touch no Mobile */}
       {!isLoading && !isPaused && !isGameOver && isMobile && <TouchControls />}
 
-      {/* Modal de Pausa */}
       {isPaused && !isGameOver && (
         <PauseOverlay
           onResume={handleTogglePause}
@@ -149,7 +148,6 @@ export const GameView: React.FC = () => {
         />
       )}
 
-      {/* Modal de Fim de Jogo */}
       {isGameOver && (
         <GameOverModal
           score={score}
