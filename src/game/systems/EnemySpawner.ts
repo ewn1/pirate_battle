@@ -1,79 +1,52 @@
-import type { EnemyType } from "../entities/Enemy";
-
 export class EnemySpawner {
-  private spawnTimer: number = 0;
   private spawnInterval: number;
+  private timer: number = 0;
 
-  constructor(spawnIntervalMs: number) {
-    this.spawnInterval = spawnIntervalMs;
+  constructor(spawnInterval: number) {
+    this.spawnInterval = spawnInterval;
   }
 
   public update(
-    delta: number,
+    deltaSeconds: number,
     screenWidth: number,
     screenHeight: number,
-    onSpawn: (
-      x: number,
-      y: number,
-      type: EnemyType,
-      textureAlias: string,
-    ) => void,
+    currentEnemyCount: number,
+    maxEnemies: number,
+    onSpawn: (x: number, y: number) => void,
   ) {
-    const msElapsed = (delta / 60) * 1000;
-    this.spawnTimer += msElapsed;
+    // Não gera novos inimigos se atingiu o limite na tela
+    if (currentEnemyCount >= maxEnemies) return;
 
-    if (this.spawnTimer >= this.spawnInterval) {
-      this.spawnTimer = 0;
-      this.spawnEnemyAtRandomBorder(screenWidth, screenHeight, onSpawn);
-    }
-  }
+    this.timer += deltaSeconds;
 
-  private spawnEnemyAtRandomBorder(
-    screenWidth: number,
-    screenHeight: number,
-    onSpawn: (
-      x: number,
-      y: number,
-      type: EnemyType,
-      textureAlias: string,
-    ) => void,
-  ) {
-    let x = 0;
-    let y = 0;
-    const side = Math.floor(Math.random() * 4);
+    if (this.timer >= this.spawnInterval) {
+      this.timer = 0;
 
-    switch (side) {
-      case 0: // Topo
+      // Declaração sem atribuição inútil para satisfazer o ESLint
+      let x: number;
+      let y: number;
+      const padding = 60;
+      const side = Math.floor(Math.random() * 4);
+
+      if (side === 0) {
+        // Topo
         x = Math.random() * screenWidth;
-        y = -50;
-        break;
-      case 1: // Direita
-        x = screenWidth + 50;
+        y = -padding;
+      } else if (side === 1) {
+        // Direita
+        x = screenWidth + padding;
         y = Math.random() * screenHeight;
-        break;
-      case 2: // Baixo
+      } else if (side === 2) {
+        // Baixo
         x = Math.random() * screenWidth;
-        y = screenHeight + 50;
-        break;
-      case 3: // Esquerda
-        x = -50;
+        y = screenHeight + padding;
+      } else {
+        // Esquerda
+        x = -padding;
         y = Math.random() * screenHeight;
-        break;
+      }
+
+      onSpawn(x, y);
     }
-
-    // Alterna o tipo de inimigo e associa aos assets oficiais do projeto
-    const isChaser = Math.random() > 0.4;
-    const type: EnemyType = isChaser ? "chaser" : "shooter";
-
-    // Chaser utiliza ship_2 ou ship_3 / Shooter utiliza ship_4 ou ship_5
-    const textureAlias = isChaser
-      ? Math.random() > 0.5
-        ? "ship_2"
-        : "ship_3"
-      : Math.random() > 0.5
-        ? "ship_4"
-        : "ship_5";
-
-    onSpawn(x, y, type, textureAlias);
   }
 }

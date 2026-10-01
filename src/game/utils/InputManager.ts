@@ -1,12 +1,9 @@
 export class InputManager {
-  private keys: { [key: string]: boolean } = {};
-  private isMouseDown: boolean = false;
+  private keys: Record<string, boolean> = {};
 
   constructor() {
     window.addEventListener("keydown", this.handleKeyDown);
     window.addEventListener("keyup", this.handleKeyUp);
-    window.addEventListener("mousedown", this.handleMouseDown);
-    window.addEventListener("mouseup", this.handleMouseUp);
   }
 
   private handleKeyDown = (e: KeyboardEvent) => {
@@ -17,27 +14,20 @@ export class InputManager {
     this.keys[e.code] = false;
   };
 
-  private handleMouseDown = () => {
-    this.isMouseDown = true;
-  };
-
-  private handleMouseUp = () => {
-    this.isMouseDown = false;
-  };
-
   public getActions() {
     return {
-      forward: !!(this.keys["KeyW"] || this.keys["ArrowUp"]),
-      left: !!(this.keys["KeyA"] || this.keys["ArrowLeft"]),
-      right: !!(this.keys["KeyD"] || this.keys["ArrowRight"]),
-      fire: !!(this.keys["Space"] || this.isMouseDown),
+      forward: this.keys["KeyW"] || this.keys["ArrowUp"] || false,
+      backward: this.keys["KeyS"] || this.keys["ArrowDown"] || false,
+      left: this.keys["KeyA"] || this.keys["ArrowLeft"] || false,
+      right: this.keys["KeyD"] || this.keys["ArrowRight"] || false,
+      fireFrontal: this.keys["Space"] || false,
+      fireBroadsideLeft: this.keys["KeyQ"] || false,
+      fireBroadsideRight: this.keys["KeyE"] || false,
     };
   }
 
   public destroy() {
     window.removeEventListener("keydown", this.handleKeyDown);
     window.removeEventListener("keyup", this.handleKeyUp);
-    window.removeEventListener("mousedown", this.handleMouseDown);
-    window.removeEventListener("mouseup", this.handleMouseUp);
   }
 }

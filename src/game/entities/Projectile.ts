@@ -2,17 +2,23 @@ import { Container, Sprite, Graphics, Assets } from "pixi.js";
 
 export class Projectile {
   public container: Container;
-  private speed: number = 12;
+  private speed: number;
   private vx: number;
   private vy: number;
   public isDead: boolean = false;
+  public isEnemy: boolean = false;
 
-  constructor(startX: number, startY: number, angle: number) {
+  constructor(
+    startX: number,
+    startY: number,
+    trajectoryAngle: number,
+    speed: number = 10,
+  ) {
     this.container = new Container();
     this.container.x = startX;
     this.container.y = startY;
+    this.speed = speed;
 
-    // Tenta carregar o sprite da bala de canhão original
     const ballTexture =
       Assets.get("cannon_ball") ||
       Assets.get("/assets/png/default/ship_parts/cannon_ball.png");
@@ -20,18 +26,16 @@ export class Projectile {
     if (ballTexture) {
       const sprite = new Sprite(ballTexture);
       sprite.anchor.set(0.5);
-      sprite.scale.set(0.8);
+      sprite.scale.set(0.75);
       this.container.addChild(sprite);
     } else {
-      // Fallback em Graphics
       const gfx = new Graphics();
       gfx.circle(0, 0, 5).fill(0x1e293b);
       this.container.addChild(gfx);
     }
 
-    const fireAngle = angle + Math.PI / 2;
-    this.vx = Math.cos(fireAngle) * this.speed;
-    this.vy = Math.sin(fireAngle) * this.speed;
+    this.vx = Math.cos(trajectoryAngle) * this.speed;
+    this.vy = Math.sin(trajectoryAngle) * this.speed;
   }
 
   public update(delta: number, screenWidth: number, screenHeight: number) {
@@ -39,10 +43,10 @@ export class Projectile {
     this.container.y += this.vy * delta;
 
     if (
-      this.container.x < -20 ||
-      this.container.x > screenWidth + 20 ||
-      this.container.y < -20 ||
-      this.container.y > screenHeight + 20
+      this.container.x < -30 ||
+      this.container.x > screenWidth + 30 ||
+      this.container.y < -30 ||
+      this.container.y > screenHeight + 30
     ) {
       this.isDead = true;
     }
