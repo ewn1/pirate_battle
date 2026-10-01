@@ -1,5 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import styled from "styled-components";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "../services/api/client";
 import { Panel } from "../components/ui/Panel";
 import { Button } from "../components/ui/Button";
 
@@ -10,24 +12,81 @@ const Title = styled.h2`
   text-transform: uppercase;
 `;
 
-const PlaceholderText = styled.p`
-  font-size: 1.2rem;
-  margin-bottom: 30px;
-  color: #ccc;
+const Table = styled.table`
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 20px;
+  background: rgba(0, 0, 0, 0.4);
+  border-radius: 8px;
+
+  th,
+  td {
+    padding: 12px;
+    text-align: center;
+    border-bottom: 1px solid #444;
+  }
+
+  th {
+    color: #ffcc00;
+    font-weight: bold;
+    text-transform: uppercase;
+  }
+
+  tr:last-child td {
+    border-bottom: none;
+  }
 `;
+
+interface RankingEntry {
+  id: number;
+  name: string;
+  score: number;
+}
 
 export const Ranking = () => {
   const navigate = useNavigate();
+
+  const {
+    data: rankingData,
+    isLoading,
+    isError,
+  } = useQuery<RankingEntry[]>({
+    queryKey: ["ranking"],
+    queryFn: async () => {
+      const response = await api.get("/ranking");
+      return response.data;
+    },
+  });
 
   return (
     <Panel>
       <Title>Ranking Global</Title>
 
-      <PlaceholderText>Dados da API em breve...</PlaceholderText>
+      {isLoading && <p>Carregando dados...</p>}
+      {isError && <p>Erro ao carregar o ranking.</p>}
 
-      <Button onClick={() => navigate("/")} tabIndex={1}>
-        Voltar
-      </Button>
+      {!isLoading && !isError && rankingData && (
+        <Table>
+          <thead>
+            <tr>
+              <th>Posição</th>
+              <th>Pirata</th>
+              <th>Pontuação</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rankingData.map((entry, index) => (
+              <tr key={entry.id}>
+                <td>{index + 1}º</td>
+                <td>{entry.name}</td>
+                <td>{entry.score}</td>
+              </tr>
+            ))}
+          </tbody>
+        </Table>
+      )}
+
+      <Button onClick={() => navigate("/")}>Voltar</Button>
     </Panel>
   );
 };
