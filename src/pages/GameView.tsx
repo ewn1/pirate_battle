@@ -1,69 +1,253 @@
-import { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import styled from "styled-components";
-import { GameEngine } from "../game/core/GameEngine";
-import { Button } from "../components/ui/Button";
+import { GameEngine, type GameCallbacks } from "../game/core/GameEngine";
+import { PauseOverlay } from "../components/game/PauseOverlay";
+import { GameOverModal } from "../components/game/GameOverModal";
+import { TouchControls } from "../components/game/TouchControls";
 
-const GameContainer = styled.div`
-  width: 100vw;
-  height: 100vh;
-  position: relative;
-  overflow: hidden;
-`;
-
-const PixiCanvasWrapper = styled.div`
-  width: 100%;
-  height: 100%;
-  position: absolute;
-  top: 0;
-  left: 0;
-  z-index: 1; /* Fica no fundo */
-`;
-
-const HUDOverlay = styled.div`
-  position: absolute;
-  top: 20px;
-  left: 20px;
-  z-index: 2; /* Fica por cima do canvas */
-  display: flex;
-  gap: 20px;
-`;
-
-export const GameView = () => {
+export const GameView: React.FC = () => {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const engineRef = useRef<GameEngine | null>(null);
   const navigate = useNavigate();
-  // Referência para a div onde o PixiJS vai injetar o canvas
-  const canvasRef = useRef<HTMLDivElement>(null);
+
+  const [isLoading, setIsLoading] = useState(true);
+  const [isPaused, setIsPaused] = useState(false);
+  const [isGameOver, setIsGameOver] = useState(false);
+
+  const [health, setHealth] = useState(100);
+  const [maxHealth, setMaxHealth] = useState(100);
+  const [score, setScore] = useState(0);
+  const [timeRemaining, setTimeRemaining] = useState(120);
+  const [survived, setSurvived] = useState(false);
+
+  const [isMobile, setIsMobile] = useState(false);
 
   useEffect(() => {
-    let engine: GameEngine | null = null;
-
-    if (canvasRef.current) {
-      // Instancia a engine
-      engine = new GameEngine();
-
-      // Inicializa passando a div como container
-      engine.init(canvasRef.current).catch((err) => {
-        console.error("Erro ao inicializar o PixiJS:", err);
-      });
-    }
-
-    // Função de limpeza (Cleanup) chamada quando o componente é desmontado
-    return () => {
-      if (engine) {
-        engine.destroy();
-      }
+    const checkMobile = () => {
+      setIsMobile(window.innerWidth <= 768 || "ontouchstart" in window);
     };
-  }, []); // O array vazio garante que inicie apenas uma vez na montagem
+    checkMobile();
+    window.addEventListener("resize", checkMobile);
+    return () => window.removeEventListener("resize", checkMobile);
+  }, []);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+
+    const callbacks: GameCallbacks = {
+      onHealthChange: (hp, maxHp) => {
+        setHealth(hp);
+        setMaxHealth(maxHp);
+      },
+      onScoreChange: (s) => setScore(s),
+      onTimeChange: (t) => setTimeRemaining(t),
+      onPauseChange: (p) => setIsPaused(p),
+      onGameOver: (finalScore, isWin) => {
+        setScore(finalScore);
+        setSurvived(isWin);
+        setIsGameOver(true);
+      },
+    };
+
+    const engine = new GameEngine(undefined, callbacks);
+    engineRef.current = engine;
+
+    engine.init(containerRef.current).then(() => {
+      setIsLoading(false);
+    });
+
+    return () => {
+      engine.destroy();
+      engineRef.current = null;
+    };
+  }, []);
+
+  const handleTogglePause = () => {
+    engineRef.current?.togglePause();
+  };
+
+  const handleRestart = () => {
+    window.location.reload();
+  };
+
+  const handleMainMenu = () => {
+    navigate("/");
+  };
+
+  const handleSubmitResult = (playerName: string) => {
+    console.log("Submitting match result:", { playerName, score, survived });
+  };
 
   return (
     <GameContainer>
-      {/* O Canvas do jogo entra aqui */}
-      <PixiCanvasWrapper ref={canvasRef} />
+      {/* Container PixiJS */}
+      <PixiCanvasContainer ref={containerRef} />
 
-      {/* HUD do React por cima do Jogo */}
-      <HUDOverlay>
-        <Button onClick={() => navigate("/")}>Abandonar Partida</Button>
-      </HUDOverlay>
+      {/* Tela de Loading */}
+      {isLoading && (
+        <LoadingScreen>
+          <LoadingTitle>Loading Battleground...</LoadingTitle>
+          <LoadingText>Preparing textures and audio assets...</LoadingText>
+        </LoadingScreen>
+      )}
+
+      {/* HUD da Partida */}
+      {!isLoading && (
+        <HudContainer>
+          <HudGroup>
+            {/* Painel de Vida */}
+            <CounterBox>
+              <HudIcon
+                src="/assets/png/default/ui/hud/icon_heart.png"
+                alt="HP"
+              />
+              <span>
+                {health} / {maxHealth}
+              </span>
+            </CounterBox>
+
+            {/* Painel de Pontuação */}
+            <CounterBox>
+              <HudIcon
+                src="/assets/png/default/ui/hud/icon_score.png"
+                alt="Score"
+              />
+              <span>{score}</span>
+            </CounterBox>
+          </HudGroup>
+
+          {/* Temporizador e Botão de Pausa */}
+          <HudGroup $interactive>
+            <CounterBox>
+              <HudIcon
+                src="/assets/png/default/ui/hud/icon_time.png"
+                alt="Time"
+              />
+              <span>{timeRemaining}s</span>
+            </CounterBox>
+
+            <PauseButton onClick={handleTogglePause} aria-label="Pause Game">
+              <HudIcon
+                src="/assets/png/default/ui/controls/icon_pause.png"
+                alt=""
+              />
+            </PauseButton>
+          </HudGroup>
+        </HudContainer>
+      )}
+
+      {/* Controles Touch no Mobile */}
+      {!isLoading && !isPaused && !isGameOver && isMobile && <TouchControls />}
+
+      {/* Modal de Pausa */}
+      {isPaused && !isGameOver && (
+        <PauseOverlay
+          onResume={handleTogglePause}
+          onRestart={handleRestart}
+          onMainMenu={handleMainMenu}
+        />
+      )}
+
+      {/* Modal de Fim de Jogo */}
+      {isGameOver && (
+        <GameOverModal
+          score={score}
+          survived={survived}
+          timePlayed={120 - timeRemaining}
+          onSubmitResult={handleSubmitResult}
+          onRestart={handleRestart}
+          onMainMenu={handleMainMenu}
+        />
+      )}
     </GameContainer>
   );
 };
+
+const GameContainer = styled.div`
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background-color: #1099bb;
+`;
+
+const PixiCanvasContainer = styled.div`
+  width: 100%;
+  height: 100%;
+`;
+
+const LoadingScreen = styled.div`
+  position: absolute;
+  inset: 0;
+  background-color: #0d1b2a;
+  color: #f8e3a1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  z-index: 200;
+`;
+
+const LoadingTitle = styled.h2`
+  margin: 0 0 8px 0;
+  font-size: 24px;
+`;
+
+const LoadingText = styled.p`
+  color: #aaa;
+  font-size: 14px;
+  margin: 0;
+`;
+
+const HudContainer = styled.div`
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  right: 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  pointer-events: none;
+  z-index: 40;
+`;
+
+const HudGroup = styled.div<{ $interactive?: boolean }>`
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  pointer-events: ${(props) => (props.$interactive ? "auto" : "none")};
+`;
+
+const CounterBox = styled.div`
+  background-image: url("/assets/png/default/ui/hud/counter_panel.png");
+  background-size: 100% 100%;
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #fff;
+  font-weight: bold;
+`;
+
+const HudIcon = styled.img`
+  width: 20px;
+  height: auto;
+`;
+
+const PauseButton = styled.button`
+  width: 44px;
+  height: 44px;
+  background-image: url("/assets/png/default/ui/controls/button_round_normal.png");
+  background-size: cover;
+  border: none;
+  background-color: transparent;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  &:active {
+    background-image: url("/assets/png/default/ui/controls/button_round_pressed.png");
+  }
+`;
