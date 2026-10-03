@@ -10,7 +10,7 @@ Stack: React 19 · strict TypeScript · PixiJS 8 · TanStack Query · Axios · M
 
 ## Live demo
 
-Deploy URL: `https://<your-project>.vercel.app` _(fill in after deploying, see "Deploy")_
+Deploy URL: <https://pirate-battle-three.vercel.app/>
 
 ## Setup
 
