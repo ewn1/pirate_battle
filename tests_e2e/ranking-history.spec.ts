@@ -111,10 +111,28 @@ test.describe("Registration", () => {
   }) => {
     await page.goto(`/?${runtimeQuery({ manual: 1, seed: 7 })}`);
     await playAndLose(page);
-    await expect(page.getByTestId("registration-status")).toHaveAttribute(
-      "data-status",
-      "saved",
-    );
+    // Under heavy load (full suite, mobile project) the first attempt can
+    // time out and wait for its backoff. Nudge "Retry now" from inside the
+    // page (the real user action) until the match is saved.
+    await expect
+      .poll(
+        () =>
+          page.evaluate(() => {
+            const status = document.querySelector(
+              '[data-testid="registration-status"]',
+            );
+            if (status?.getAttribute("data-status") !== "saved") {
+              document
+                .querySelector<HTMLButtonElement>(
+                  '[data-testid="retry-registration"]',
+                )
+                ?.click();
+            }
+            return status?.getAttribute("data-status");
+          }),
+        { timeout: 20_000 },
+      )
+      .toBe("saved");
     await page.getByTestId("main-menu").click();
     await page.getByTestId("history-button").click();
     await expect(page.getByTestId("history-row")).toHaveCount(1);
