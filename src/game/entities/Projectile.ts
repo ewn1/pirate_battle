@@ -1,54 +1,96 @@
-import { Container, Sprite, Graphics, Assets } from "pixi.js";
+/**
+ * [PROJECTILE]
+ * Simulation state (position, velocity, damage, lifetime) plus a tiny Pixi
+ * view. A projectile applies damage exactly once: `consume()` marks it as
+ * spent and the engine removes it at the end of the step.
+ */
+import { Container, Graphics, Sprite, Texture } from "pixi.js";
+import { getTexture } from "../core/assetManifest";
+
+export type ProjectileOwner = "player" | "enemy";
+
+export interface ProjectileSpec {
+  /** Which weapon produced it (used for sound/visual feedback). */
+  weapon: "front" | "broadside" | "enemy";
+  x: number;
+  y: number;
+  /** Travel direction in radians. */
+  angle: number;
+  speed: number;
+  damage: number;
+  /** Seconds before the projectile expires. */
+  lifetime: number;
+  owner: ProjectileOwner;
+}
 
 export class Projectile {
-  public container: Container;
-  private speed: number;
+  public readonly id: number;
+  public readonly view = new Container();
+  public readonly radius = 5;
+  public readonly weapon: ProjectileSpec["weapon"];
+
+  public x: number;
+  public y: number;
+  public readonly damage: number;
+  public readonly owner: ProjectileOwner;
+  /** True once the projectile hit something (damage already applied). */
+  public consumed = false;
+
   private vx: number;
   private vy: number;
-  public isDead: boolean = false;
-  public isEnemy: boolean = false;
+  private ttl: number;
 
-  constructor(
-    startX: number,
-    startY: number,
-    trajectoryAngle: number,
-    speed: number = 10,
-  ) {
-    this.container = new Container();
-    this.container.x = startX;
-    this.container.y = startY;
-    this.speed = speed;
+  constructor(id: number, spec: ProjectileSpec) {
+    this.id = id;
+    this.weapon = spec.weapon;
+    this.x = spec.x;
+    this.y = spec.y;
+    this.vx = Math.cos(spec.angle) * spec.speed;
+    this.vy = Math.sin(spec.angle) * spec.speed;
+    this.damage = spec.damage;
+    this.ttl = spec.lifetime;
+    this.owner = spec.owner;
 
-    const ballTexture =
-      Assets.get("cannon_ball") ||
-      Assets.get("/assets/png/default/ship_parts/cannon_ball.png");
-
-    if (ballTexture) {
-      const sprite = new Sprite(ballTexture);
+    const texture = getTexture("cannon_ball");
+    if (texture !== Texture.EMPTY) {
+      const sprite = new Sprite(texture);
       sprite.anchor.set(0.5);
       sprite.scale.set(0.75);
-      this.container.addChild(sprite);
+      this.view.addChild(sprite);
     } else {
-      const gfx = new Graphics();
-      gfx.circle(0, 0, 5).fill(0x1e293b);
-      this.container.addChild(gfx);
+      this.view.addChild(new Graphics().circle(0, 0, this.radius).fill(0x1e293b));
     }
-
-    this.vx = Math.cos(trajectoryAngle) * this.speed;
-    this.vy = Math.sin(trajectoryAngle) * this.speed;
+    this.syncView();
   }
 
-  public update(delta: number, screenWidth: number, screenHeight: number) {
-    this.container.x += this.vx * delta;
-    this.container.y += this.vy * delta;
+  public update(dt: number) {
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
+    this.ttl -= dt;
+  }
 
-    if (
-      this.container.x < -30 ||
-      this.container.x > screenWidth + 30 ||
-      this.container.y < -30 ||
-      this.container.y > screenHeight + 30
-    ) {
-      this.isDead = true;
-    }
+  public get expired(): boolean {
+    return this.ttl <= 0;
+  }
+
+  public isOutside(width: number, height: number, margin = 30): boolean {
+    return (
+      this.x < -margin ||
+      this.x > width + margin ||
+      this.y < -margin ||
+      this.y > height + margin
+    );
+  }
+
+  public consume() {
+    this.consumed = true;
+  }
+
+  public syncView() {
+    this.view.position.set(this.x, this.y);
+  }
+
+  public destroy() {
+    this.view.destroy({ children: true });
   }
 }

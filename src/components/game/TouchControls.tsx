@@ -1,164 +1,120 @@
-import React from "react";
+/**
+ * [TOUCH CONTROLS]
+ * On-screen controls for touch devices, built on Pointer Events so several
+ * fingers work at once (sail + fire simultaneously).
+ *
+ *   left cluster : turn left | forward | turn right
+ *   right cluster: broadside left | front cannon | broadside right
+ *
+ * Presses go straight to the engine's InputManager (no synthetic keyboard
+ * events, no React state), so holding a button never re-renders anything.
+ */
 import styled from "styled-components";
+import type { GameAction } from "../../game/utils/InputManager";
 
-export const TouchControls: React.FC = () => {
-  const dispatchKey = (key: string, type: "keydown" | "keyup") => {
-    window.dispatchEvent(new KeyboardEvent(type, { key }));
-  };
+interface TouchControlsProps {
+  onPress: (action: GameAction, pressed: boolean) => void;
+}
 
-  const handleTouchStart =
-    (key: string) => (e: React.TouchEvent | React.MouseEvent) => {
-      e.preventDefault();
-      dispatchKey(key, "keydown");
-    };
+const ICONS = "/assets/png/default/ui/controls";
 
-  const handleTouchEnd =
-    (key: string) => (e: React.TouchEvent | React.MouseEvent) => {
-      e.preventDefault();
-      dispatchKey(key, "keyup");
-    };
-
-  return (
-    <ControlsWrapper>
-      {/* Controles D-Pad (Movimentação e Rotação) */}
-      <DPadGrid>
-        <EmptySlot />
-        <TouchButton
-          onTouchStart={handleTouchStart("ArrowUp")}
-          onTouchEnd={handleTouchEnd("ArrowUp")}
-          onMouseDown={handleTouchStart("ArrowUp")}
-          onMouseUp={handleTouchEnd("ArrowUp")}
-          aria-label="Forward"
-        >
-          <ButtonIcon
-            src="/assets/png/default/ui/controls/icon_forward.png"
-            alt=""
-          />
-        </TouchButton>
-        <EmptySlot />
-        <TouchButton
-          onTouchStart={handleTouchStart("ArrowLeft")}
-          onTouchEnd={handleTouchEnd("ArrowLeft")}
-          onMouseDown={handleTouchStart("ArrowLeft")}
-          onMouseUp={handleTouchEnd("ArrowLeft")}
-          aria-label="Turn Left"
-        >
-          <ButtonIcon
-            src="/assets/png/default/ui/controls/icon_turn_left.png"
-            alt=""
-          />
-        </TouchButton>
-        <EmptySlot />
-        <TouchButton
-          onTouchStart={handleTouchStart("ArrowRight")}
-          onTouchEnd={handleTouchEnd("ArrowRight")}
-          onMouseDown={handleTouchStart("ArrowRight")}
-          onMouseUp={handleTouchEnd("ArrowRight")}
-          aria-label="Turn Right"
-        >
-          <ButtonIcon
-            src="/assets/png/default/ui/controls/icon_turn_right.png"
-            alt=""
-          />
-        </TouchButton>
-      </DPadGrid>
-
-      {/* Botões de Ataque / Canhões */}
-      <ActionGroup>
-        <TouchButton
-          onTouchStart={handleTouchStart("q")}
-          onTouchEnd={handleTouchEnd("q")}
-          onMouseDown={handleTouchStart("q")}
-          onMouseUp={handleTouchEnd("q")}
-          aria-label="Broadside Left"
-        >
-          <ButtonIcon
-            src="/assets/png/default/ui/controls/icon_fire_left.png"
-            alt=""
-          />
-        </TouchButton>
-
-        <TouchButton
-          $large
-          onTouchStart={handleTouchStart(" ")}
-          onTouchEnd={handleTouchEnd(" ")}
-          onMouseDown={handleTouchStart(" ")}
-          onMouseUp={handleTouchEnd(" ")}
-          aria-label="Fire Front"
-        >
-          <ButtonIcon
-            $large
-            src="/assets/png/default/ui/controls/icon_fire_front.png"
-            alt=""
-          />
-        </TouchButton>
-
-        <TouchButton
-          onTouchStart={handleTouchStart("e")}
-          onTouchEnd={handleTouchEnd("e")}
-          onMouseDown={handleTouchStart("e")}
-          onMouseUp={handleTouchEnd("e")}
-          aria-label="Broadside Right"
-        >
-          <ButtonIcon
-            src="/assets/png/default/ui/controls/icon_fire_right.png"
-            alt=""
-          />
-        </TouchButton>
-      </ActionGroup>
-    </ControlsWrapper>
-  );
-};
-
-const ControlsWrapper = styled.div`
+const Wrapper = styled.div`
   position: absolute;
-  bottom: 20px;
   left: 0;
   right: 0;
-  display: flex;
-  justify-content: space-between;
-  padding: 0 24px;
-  pointer-events: none;
+  bottom: 0;
   z-index: 50;
-`;
-
-const DPadGrid = styled.div`
-  display: grid;
-  grid-template-columns: repeat(3, 54px);
-  grid-template-rows: repeat(2, 54px);
-  gap: 8px;
-  pointer-events: auto;
-`;
-
-const EmptySlot = styled.div``;
-
-const ActionGroup = styled.div`
   display: flex;
-  gap: 12px;
   align-items: flex-end;
+  justify-content: space-between;
+  padding: 0 max(14px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom))
+    max(14px, env(safe-area-inset-left));
+  pointer-events: none;
+`;
+
+const Cluster = styled.div`
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
   pointer-events: auto;
 `;
 
-const TouchButton = styled.button<{ $large?: boolean }>`
-  width: ${(props) => (props.$large ? "64px" : "54px")};
-  height: ${(props) => (props.$large ? "64px" : "54px")};
-  background-image: url("/assets/png/default/ui/controls/button_round_normal.png");
-  background-size: cover;
+const Hold = styled.button<{ $large?: boolean }>`
+  width: ${(props) => (props.$large ? "76px" : "62px")};
+  height: ${(props) => (props.$large ? "76px" : "62px")};
   border: none;
-  background-color: transparent;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
+  background: url("${ICONS}/button_round_normal.png") center / contain no-repeat;
+  display: grid;
+  place-items: center;
+  opacity: 0.88;
   user-select: none;
-  touch-action: manipulation;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: none;
 
   &:active {
-    background-image: url("/assets/png/default/ui/controls/button_round_pressed.png");
+    background-image: url("${ICONS}/button_round_pressed.png");
+    opacity: 1;
+  }
+
+  img {
+    width: ${(props) => (props.$large ? "34px" : "28px")};
+    pointer-events: none;
   }
 `;
 
-const ButtonIcon = styled.img<{ $large?: boolean }>`
-  width: ${(props) => (props.$large ? "30px" : "24px")};
-  height: auto;
-`;
+interface HoldButtonProps {
+  action: GameAction;
+  label: string;
+  icon: string;
+  testId: string;
+  large?: boolean;
+  onPress: TouchControlsProps["onPress"];
+}
+
+function HoldButton({ action, label, icon, testId, large, onPress }: HoldButtonProps) {
+  const release = () => onPress(action, false);
+
+  return (
+    <Hold
+      type="button"
+      $large={large}
+      tabIndex={-1}
+      aria-label={label}
+      data-testid={testId}
+      data-sound="none"
+      onPointerDown={(event) => {
+        event.preventDefault();
+        try {
+          event.currentTarget.setPointerCapture(event.pointerId);
+        } catch {
+          /* synthetic pointers cannot be captured */
+        }
+        onPress(action, true);
+      }}
+      onPointerUp={release}
+      onPointerCancel={release}
+      onLostPointerCapture={release}
+      onContextMenu={(event) => event.preventDefault()}
+    >
+      <img src={`${ICONS}/${icon}.png`} alt="" draggable={false} />
+    </Hold>
+  );
+}
+
+export function TouchControls({ onPress }: TouchControlsProps) {
+  return (
+    <Wrapper role="group" aria-label="Touch controls" data-testid="touch-controls">
+      <Cluster>
+        <HoldButton action="left" label="Turn left" icon="icon_turn_left" testId="touch-left" onPress={onPress} />
+        <HoldButton action="forward" label="Sail forward" icon="icon_forward" testId="touch-forward" large onPress={onPress} />
+        <HoldButton action="right" label="Turn right" icon="icon_turn_right" testId="touch-right" onPress={onPress} />
+      </Cluster>
+      <Cluster>
+        <HoldButton action="fireLeft" label="Fire left broadside" icon="icon_fire_left" testId="touch-fire-left" onPress={onPress} />
+        <HoldButton action="fireFront" label="Fire front cannon" icon="icon_fire_front" testId="touch-fire-front" large onPress={onPress} />
+        <HoldButton action="fireRight" label="Fire right broadside" icon="icon_fire_right" testId="touch-fire-right" onPress={onPress} />
+      </Cluster>
+    </Wrapper>
+  );
+}

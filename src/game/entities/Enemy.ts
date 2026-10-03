@@ -1,130 +1,180 @@
-import { Container, Sprite, Graphics, Texture } from "pixi.js";
-import { getGameTexture } from "../utils/textureUtils";
+/**
+ * [ENEMY]
+ * Simulation state and AI of both enemy types.
+ *
+ *  - Chaser : turns toward the player and rams it (explodes on impact).
+ *  - Shooter: approaches until `preferredRange`, then holds position and
+ *             fires when the player is inside `attackRange`.
+ *
+ * Both rotate at a limited turn rate, avoid islands, take damage and stop
+ * participating in the simulation the moment they are destroyed.
+ */
+import type { GameConfig } from "../config/GameConfig";
+import type { Circle } from "../utils/Collision";
+import { normalizeAngle, steerAroundIslands } from "../utils/Collision";
+import type { ProjectileSpec } from "./Projectile";
+import { ShipVisual } from "../ui/ShipVisual";
 
 export type EnemyType = "chaser" | "shooter";
 
-export class Enemy {
-  public container: Container;
-  public sprite: Sprite;
-  public type: EnemyType;
-  public health: number;
-  public maxHealth: number;
-  public isDying = false;
-  public isDead = false;
+/** How long the sinking animation lingers after destruction (s). */
+const SINK_DURATION = 0.9;
 
-  private healthBar: Container;
-  private healthFill: Graphics;
-  private attackCooldown = 0;
+export interface EnemyContext {
+  playerX: number;
+  playerY: number;
+  islands: readonly Circle[];
+  arena: { width: number; height: number };
+}
+
+export class Enemy {
+  public readonly id: number;
+  public readonly type: EnemyType;
+  public readonly visual: ShipVisual;
+  public readonly radius: number;
+  public readonly maxHealth: number;
+
+  public x: number;
+  public y: number;
+  public heading: number;
+  public health: number;
+
+  /** False as soon as the enemy is destroyed (no damage, shots or collisions). */
+  public alive = true;
+  /** True once the sinking animation ended and the engine may remove it. */
+  public removable = false;
+
+  private readonly config: GameConfig;
+  private fireCooldown: number;
+  private sinkTimer = 0;
 
   constructor(
+    id: number,
     type: EnemyType,
-    textureAlias: string,
+    config: GameConfig,
     x: number,
     y: number,
-    health: number = 30,
+    initialHeading: number,
   ) {
+    this.id = id;
     this.type = type;
-    this.health = health;
-    this.maxHealth = health;
-
-    this.container = new Container();
-    this.container.x = x;
-    this.container.y = y;
-
-    // Busca de textura segura para o navio inimigo
-    const texture = getGameTexture(textureAlias);
-
-    this.sprite = new Sprite(texture);
-    this.sprite.anchor.set(0.5);
-    this.sprite.scale.set(0.55);
-    this.container.addChild(this.sprite);
-
-    // Barra de vida flutuante
-    this.healthBar = new Container();
-    this.healthBar.y = -40;
-
-    const bg = new Graphics();
-    bg.rect(-20, -3, 40, 6).fill(0x222222);
-    this.healthBar.addChild(bg);
-
-    this.healthFill = new Graphics();
-    this.healthBar.addChild(this.healthFill);
-    this.updateHealthBar();
-
-    this.container.addChild(this.healthBar);
+    this.config = config;
+    const stats = type === "chaser" ? config.chaser : config.shooter;
+    this.x = x;
+    this.y = y;
+    this.heading = initialHeading;
+    this.radius = stats.radius;
+    this.maxHealth = stats.health;
+    this.health = stats.health;
+    // Shooters need a moment before their first shot.
+    this.fireCooldown = type === "shooter" ? config.shooter.fireCooldown * 0.6 : 0;
+    this.visual = new ShipVisual({
+      colorSlot: type === "chaser" ? 2 : 3,
+      scale: 0.55,
+      isEnemy: true,
+    });
+    this.syncView(0);
   }
 
-  public takeDamage(amount: number) {
-    this.health = Math.max(0, this.health - amount);
-    this.updateHealthBar();
-    if (this.health <= 0 && !this.isDying) {
-      this.triggerDeath();
+  /**
+   * Advances the AI by `dt` seconds.
+   * Returns a projectile spec when the Shooter fires this step.
+   */
+  public update(dt: number, ctx: EnemyContext): ProjectileSpec | null {
+    if (!this.alive) {
+      this.sinkTimer += dt;
+      if (this.sinkTimer >= SINK_DURATION) this.removable = true;
+      return null;
     }
-  }
 
-  private updateHealthBar() {
-    const ratio = this.health / this.maxHealth;
-    this.healthFill.clear();
-    const color = ratio > 0.5 ? 0x22c55e : ratio > 0.25 ? 0xeab308 : 0xef4444;
-    this.healthFill.rect(-19, -2, 38 * ratio, 4).fill(color);
-  }
-
-  public update(
-    playerX: number,
-    playerY: number,
-    delta: number,
-    onShoot?: (x: number, y: number, rotation: number) => void,
-  ) {
-    if (this.isDying || this.isDead) return;
-
-    const dx = playerX - this.container.x;
-    const dy = playerY - this.container.y;
+    const stats = this.type === "chaser" ? this.config.chaser : this.config.shooter;
+    const dx = ctx.playerX - this.x;
+    const dy = ctx.playerY - this.y;
     const distance = Math.hypot(dx, dy);
-    const targetAngle = Math.atan2(dy, dx) - Math.PI / 2;
+    const angleToPlayer = Math.atan2(dy, dx);
 
-    this.container.rotation = targetAngle;
+    // 1. Steering: aim at the player but go around islands in the way.
+    const desired = steerAroundIslands(
+      this.x,
+      this.y,
+      angleToPlayer,
+      this.radius,
+      distance,
+      ctx.islands,
+    );
 
+    // 2. Rotation with a limited turn rate.
+    const diff = normalizeAngle(desired - this.heading);
+    const maxTurn = stats.turnRate * dt;
+    this.heading += Math.max(-maxTurn, Math.min(maxTurn, diff));
+
+    // 3. Movement along the heading.
+    let shot: ProjectileSpec | null = null;
     if (this.type === "chaser") {
-      const speed = 2.2;
-      this.container.x += Math.cos(targetAngle + Math.PI / 2) * speed * delta;
-      this.container.y += Math.sin(targetAngle + Math.PI / 2) * speed * delta;
-    } else if (this.type === "shooter") {
-      if (distance > 220) {
-        const speed = 1.5;
-        this.container.x += Math.cos(targetAngle + Math.PI / 2) * speed * delta;
-        this.container.y += Math.sin(targetAngle + Math.PI / 2) * speed * delta;
-      } else {
-        if (this.attackCooldown <= 0) {
-          if (onShoot) {
-            onShoot(
-              this.container.x,
-              this.container.y,
-              this.container.rotation,
-            );
-          }
-          this.attackCooldown = 90;
-        }
+      this.advance(this.config.chaser.speed * dt);
+    } else {
+      const shooter = this.config.shooter;
+      if (distance > shooter.preferredRange) {
+        this.advance(shooter.speed * dt);
+      }
+
+      this.fireCooldown = Math.max(0, this.fireCooldown - dt);
+      const aimError = Math.abs(normalizeAngle(angleToPlayer - this.heading));
+      if (distance <= shooter.attackRange && aimError < 0.3 && this.fireCooldown <= 0) {
+        this.fireCooldown = shooter.fireCooldown;
+        const muzzle = this.radius + 8;
+        shot = {
+          weapon: "enemy",
+          x: this.x + Math.cos(this.heading) * muzzle,
+          y: this.y + Math.sin(this.heading) * muzzle,
+          angle: this.heading,
+          speed: shooter.projectile.speed,
+          damage: shooter.projectile.damage,
+          lifetime: shooter.projectile.lifetime,
+          owner: "enemy",
+        };
       }
     }
 
-    if (this.attackCooldown > 0) {
-      this.attackCooldown -= delta;
-    }
+    // 4. Stay inside the arena.
+    const margin = this.radius;
+    this.x = Math.min(ctx.arena.width - margin, Math.max(margin, this.x));
+    this.y = Math.min(ctx.arena.height - margin, Math.max(margin, this.y));
+
+    return shot;
   }
 
-  public triggerDeath() {
-    this.isDying = true;
+  public takeDamage(amount: number) {
+    if (!this.alive) return;
+    this.health = Math.max(0, this.health - amount);
+    this.visual.flash();
+  }
 
-    // Troca a textura para o navio destruído (ship_21.png)
-    const destroyedTexture = getGameTexture("ship_21");
-    if (destroyedTexture && destroyedTexture !== Texture.EMPTY) {
-      this.sprite.texture = destroyedTexture;
+  /** Marks the enemy as destroyed. Idempotent. */
+  public destroyShip() {
+    if (!this.alive) return;
+    this.alive = false;
+    this.health = Math.max(0, this.health);
+    this.visual.markSunk();
+  }
+
+  /** Pushes the simulation state into the Pixi view. */
+  public syncView(dt: number) {
+    this.visual.setPose(this.x, this.y, this.heading);
+    if (this.alive) {
+      this.visual.setHealth(this.health, this.maxHealth);
+    } else {
+      this.visual.setAlpha(Math.max(0, 1 - this.sinkTimer / SINK_DURATION));
     }
+    this.visual.update(dt);
+  }
 
-    this.healthBar.visible = false;
+  public destroy() {
+    this.visual.destroy();
+  }
 
-    setTimeout(() => {
-      this.isDead = true;
-    }, 600);
+  private advance(distance: number) {
+    this.x += Math.cos(this.heading) * distance;
+    this.y += Math.sin(this.heading) * distance;
   }
 }

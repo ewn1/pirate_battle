@@ -1,13 +1,26 @@
 {
   "name": "pirate-battle",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "preview": "vite preview",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "typecheck": "tsc -b",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:update": "playwright test --project=visual --update-snapshots",
+    "test:e2e:report": "playwright show-report",
+    "playwright:install": "playwright install chromium",
+    "profile": "node scripts/profile.mjs",
+    "profile:quick": "node scripts/profile.mjs --seconds=30 --cycles=5",
+    "report:save": "node scripts/save-reports.mjs",
+    "mocks:init": "msw init public/ --save"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.104.0",

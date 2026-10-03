@@ -1,63 +1,87 @@
-export interface Positionable {
-  x: number;
-  y: number;
-  radius?: number;
-}
-
-export interface IslandObstacle {
+/**
+ * [COLLISION HELPERS]
+ * Pure circle-based geometry. Ships, projectiles and islands are circles;
+ * this keeps the maths cheap and deterministic.
+ */
+export interface Circle {
   x: number;
   y: number;
   radius: number;
 }
 
-/**
- * Colisão circular simples por distância.
- */
-export function checkCollision(
-  objA: Positionable,
-  objB: Positionable,
-  threshold?: number,
-): boolean {
-  const effectiveThreshold =
-    threshold ?? (objA.radius || 20) + (objB.radius || 20);
-  const dx = objA.x - objB.x;
-  const dy = objA.y - objB.y;
-  return dx * dx + dy * dy < effectiveThreshold * effectiveThreshold;
+export function circlesOverlap(a: Circle, b: Circle): boolean {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  const r = a.radius + b.radius;
+  return dx * dx + dy * dy < r * r;
 }
 
 /**
- * Resolve colisão entre um navio/entidade e uma ilha circular.
- * Se houver intersecção, empurra o objeto para fora da ilha.
+ * Pushes `entity` out of `island` when they overlap.
+ * Returns true when a correction was applied.
  */
 export function resolveIslandCollision(
-  entity: { x: number; y: number; radius: number },
-  island: IslandObstacle,
+  entity: Circle,
+  island: Circle,
 ): boolean {
   const dx = entity.x - island.x;
   const dy = entity.y - island.y;
-  const distance = Math.sqrt(dx * dx + dy * dy);
+  const distance = Math.hypot(dx, dy);
   const minDistance = entity.radius + island.radius;
+  if (distance >= minDistance) return false;
 
-  if (distance < minDistance && distance > 0) {
-    const overlap = minDistance - distance;
-    const normalX = dx / distance;
-    const normalY = dy / distance;
-
-    entity.x += normalX * overlap;
-    entity.y += normalY * overlap;
+  if (distance === 0) {
+    // Perfect overlap: push along +x so we never divide by zero.
+    entity.x = island.x + minDistance;
     return true;
   }
-  return false;
+  const overlap = minDistance - distance;
+  entity.x += (dx / distance) * overlap;
+  entity.y += (dy / distance) * overlap;
+  return true;
+}
+
+/** Wraps an angle into (-PI, PI]. */
+export function normalizeAngle(angle: number): number {
+  const twoPi = Math.PI * 2;
+  return ((((angle + Math.PI) % twoPi) + twoPi) % twoPi) - Math.PI;
 }
 
 /**
- * Verifica se um projétil colidiu com uma ilha.
+ * Simple obstacle avoidance: if an island blocks the straight line to the
+ * target, steer along its tangent on the side needing the smaller correction.
  */
-export function isPointInsideIsland(
-  point: Positionable,
-  island: IslandObstacle,
-): boolean {
-  const dx = point.x - island.x;
-  const dy = point.y - island.y;
-  return dx * dx + dy * dy < island.radius * island.radius;
+export function steerAroundIslands(
+  x: number,
+  y: number,
+  desiredAngle: number,
+  entityRadius: number,
+  targetDistance: number,
+  islands: readonly Circle[],
+  lookahead = 150,
+): number {
+  let angle = desiredAngle;
+  for (const island of islands) {
+    const dx = island.x - x;
+    const dy = island.y - y;
+    const dist = Math.hypot(dx, dy);
+    const clearance = island.radius + entityRadius + 24;
+
+    // Ignore islands that are far away or behind the target.
+    if (dist > clearance + lookahead) continue;
+    if (dist - island.radius > targetDistance) continue;
+
+    const toIsland = Math.atan2(dy, dx);
+    const diff = normalizeAngle(toIsland - angle);
+    const halfWidth = Math.asin(
+      Math.min(1, clearance / Math.max(dist, clearance + 0.001)),
+    );
+    const margin = halfWidth + 0.15;
+
+    if (Math.abs(diff) < margin) {
+      const side = diff >= 0 ? -1 : 1;
+      angle = toIsland + side * margin;
+    }
+  }
+  return angle;
 }

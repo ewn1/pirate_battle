@@ -1,227 +1,161 @@
-import { Container, Sprite, Graphics } from "pixi.js";
-import { getGameTexture } from "../utils/textureUtils";
+/**
+ * [PLAYER]
+ * Simulation state of the player's ship: movement, health and weapon
+ * cooldowns. All numbers come from GameConfig. Time is advanced only by the
+ * engine's fixed step, so pausing freezes cooldowns automatically.
+ */
+import type { GameConfig } from "../config/GameConfig";
+import type { ActionState } from "../utils/InputManager";
+import type { ProjectileSpec } from "./Projectile";
+import { ShipVisual } from "../ui/ShipVisual";
 
-export interface FiredProjectileData {
-  x: number;
-  y: number;
-  angle: number;
-  isPlayer: boolean;
-  damage: number;
-  speed: number;
-  lifetime: number;
-}
+export type WeaponKind = "front" | "left" | "right";
 
 export class Player {
-  public container: Container;
-  public sprite: Sprite;
-  public health: number = 100;
-  public maxHealth: number = 100;
-  public radius: number = 22;
+  public readonly id: number;
+  public readonly visual: ShipVisual;
+  private readonly config: GameConfig;
 
-  private speed: number = 0;
-  private maxSpeed: number = 4.5;
-  private reverseMaxSpeed: number = -2.0;
-  private acceleration: number = 0.12;
-  private friction: number = 0.97;
-  private rotationSpeed: number = 0.045;
-  private currentRotation: number = 0;
+  public x: number;
+  public y: number;
+  /** Travel direction in radians (0 = east). */
+  public heading: number;
+  /** Signed speed along the heading (px/s). */
+  public speed = 0;
+  public health: number;
+  public readonly maxHealth: number;
+  public readonly radius: number;
 
-  // Cooldowns de disparo (em milissegundos)
-  private frontCooldownTimer: number = 0;
-  private sideCooldownTimer: number = 0;
-  private readonly FRONT_COOLDOWN: number = 350; // ms
-  private readonly SIDE_COOLDOWN: number = 900; // ms
+  /** Remaining cooldown per weapon (seconds). */
+  public cooldowns: Record<WeaponKind, number> = { front: 0, left: 0, right: 0 };
 
-  // UI - Barra de vida acima do navio
-  private healthBarContainer: Container;
-  private healthBarFill: Graphics;
+  constructor(id: number, config: GameConfig, x: number, y: number) {
+    this.id = id;
+    this.config = config;
+    this.x = x;
+    this.y = y;
+    this.heading = 0;
+    this.health = config.player.maxHealth;
+    this.maxHealth = config.player.maxHealth;
+    this.radius = config.player.radius;
+    this.visual = new ShipVisual({ colorSlot: 1, scale: 0.65, isEnemy: false });
+    this.syncView(0);
+  }
 
-  constructor(textureAlias: string = "ship_1", startX: number, startY: number) {
-    this.container = new Container();
-    this.container.x = startX;
-    this.container.y = startY;
+  /** Rotation, acceleration/drag and arena clamping. */
+  public update(dt: number, input: ActionState) {
+    const cfg = this.config.player;
 
-    const texture = getGameTexture(textureAlias);
-    this.sprite = new Sprite(texture);
-    this.sprite.anchor.set(0.5);
-    this.sprite.scale.set(0.65);
+    if (input.left) this.heading -= cfg.rotationSpeed * dt;
+    if (input.right) this.heading += cfg.rotationSpeed * dt;
 
-    this.container.addChild(this.sprite);
+    if (input.forward) {
+      this.speed = Math.min(cfg.maxSpeed, this.speed + cfg.acceleration * dt);
+    } else if (input.backward) {
+      this.speed = Math.max(
+        -cfg.reverseMaxSpeed,
+        this.speed - cfg.acceleration * 0.6 * dt,
+      );
+    } else {
+      this.speed *= Math.pow(cfg.dragPerSecond, dt);
+      if (Math.abs(this.speed) < 1) this.speed = 0;
+    }
 
-    // Inicializa a barra de vida acima do navio
-    this.healthBarContainer = new Container();
-    this.healthBarContainer.y = -42;
-    this.healthBarFill = new Graphics();
-    this.healthBarContainer.addChild(this.healthBarFill);
-    this.container.addChild(this.healthBarContainer);
+    this.x += Math.cos(this.heading) * this.speed * dt;
+    this.y += Math.sin(this.heading) * this.speed * dt;
 
-    this.updateHealthBar();
+    // Keep the ship inside the visible arena.
+    const margin = this.radius + 6;
+    const { width, height } = this.config.arena;
+    this.x = Math.min(width - margin, Math.max(margin, this.x));
+    this.y = Math.min(height - margin, Math.max(margin, this.y));
+
+    for (const kind of ["front", "left", "right"] as const) {
+      if (this.cooldowns[kind] > 0) {
+        this.cooldowns[kind] = Math.max(0, this.cooldowns[kind] - dt);
+      }
+    }
+  }
+
+  /**
+   * Fires every requested weapon that is off cooldown.
+   * Returns the projectiles to create (engine owns their lifecycle).
+   */
+  public collectShots(input: ActionState): ProjectileSpec[] {
+    const shots: ProjectileSpec[] = [];
+    const cfg = this.config.player;
+
+    if (input.fireFront && this.cooldowns.front <= 0) {
+      this.cooldowns.front = cfg.frontal.cooldown;
+      const offset = this.radius + 6;
+      shots.push({
+        weapon: "front",
+        x: this.x + Math.cos(this.heading) * offset,
+        y: this.y + Math.sin(this.heading) * offset,
+        angle: this.heading,
+        speed: cfg.frontal.speed,
+        damage: cfg.frontal.damage,
+        lifetime: cfg.frontal.lifetime,
+        owner: "player",
+      });
+    }
+
+    if (input.fireLeft && this.cooldowns.left <= 0) {
+      this.cooldowns.left = cfg.broadside.cooldown;
+      shots.push(...this.broadsideVolley(-1));
+    }
+
+    if (input.fireRight && this.cooldowns.right <= 0) {
+      this.cooldowns.right = cfg.broadside.cooldown;
+      shots.push(...this.broadsideVolley(1));
+    }
+
+    return shots;
+  }
+
+  /** Three parallel projectiles fired perpendicular to the heading. */
+  private broadsideVolley(side: -1 | 1): ProjectileSpec[] {
+    const cfg = this.config.player.broadside;
+    const sideAngle = this.heading + (side * Math.PI) / 2;
+    const half = (cfg.count - 1) / 2;
+    const volley: ProjectileSpec[] = [];
+
+    for (let i = 0; i < cfg.count; i++) {
+      // Spread along the ship's length so the shots travel in parallel.
+      const along = (i - half) * cfg.spacing;
+      volley.push({
+        weapon: "broadside",
+        x:
+          this.x +
+          Math.cos(this.heading) * along +
+          Math.cos(sideAngle) * (this.radius - 4),
+        y:
+          this.y +
+          Math.sin(this.heading) * along +
+          Math.sin(sideAngle) * (this.radius - 4),
+        angle: sideAngle,
+        speed: cfg.speed,
+        damage: cfg.damage,
+        lifetime: cfg.lifetime,
+        owner: "player",
+      });
+    }
+    return volley;
   }
 
   public takeDamage(amount: number) {
     this.health = Math.max(0, this.health - amount);
-    this.updateHealthBar();
-    this.applyVisualDegradation();
+    this.visual.flash();
   }
 
-  public repair(amount: number) {
-    this.health = Math.min(this.maxHealth, this.health + amount);
-    this.updateHealthBar();
-    this.applyVisualDegradation();
+  /** Pushes the simulation state into the Pixi view. */
+  public syncView(dt: number) {
+    this.visual.setPose(this.x, this.y, this.heading);
+    this.visual.setHealth(this.health, this.maxHealth);
+    this.visual.update(dt);
   }
 
-  private applyVisualDegradation() {
-    const healthPercent = this.health / this.maxHealth;
-    if (healthPercent < 0.3) {
-      this.sprite.tint = 0xff6666; // Vermelho escuro/Avariado
-    } else if (healthPercent < 0.6) {
-      this.sprite.tint = 0xffcc88; // Levemente danificado
-    } else {
-      this.sprite.tint = 0xffffff; // Normal
-    }
-  }
-
-  private updateHealthBar() {
-    this.healthBarFill.clear();
-    const barWidth = 40;
-    const barHeight = 5;
-    const healthRatio = this.health / this.maxHealth;
-
-    // Fundo escuro
-    this.healthBarFill.rect(-barWidth / 2, 0, barWidth, barHeight);
-    this.healthBarFill.fill({ color: 0x111111, alpha: 0.8 });
-
-    // Cor dinâmica da barra (Verde > Amarelo > Vermelho)
-    let fillColor = 0x22c55e;
-    if (healthRatio < 0.3) fillColor = 0xef4444;
-    else if (healthRatio < 0.6) fillColor = 0xeab308;
-
-    if (healthRatio > 0) {
-      this.healthBarFill.rect(
-        -barWidth / 2,
-        0,
-        barWidth * healthRatio,
-        barHeight,
-      );
-      this.healthBarFill.fill({ color: fillColor });
-    }
-  }
-
-  public update(
-    input: {
-      forward: boolean;
-      backward: boolean;
-      left: boolean;
-      right: boolean;
-      fire: boolean;
-      fireLeft: boolean;
-      fireRight: boolean;
-    },
-    screenWidth: number,
-    screenHeight: number,
-    delta: number,
-    deltaTimeMs: number = 16.66,
-  ): FiredProjectileData[] {
-    const firedProjectiles: FiredProjectileData[] = [];
-
-    // Atualização de Cooldowns
-    if (this.frontCooldownTimer > 0) this.frontCooldownTimer -= deltaTimeMs;
-    if (this.sideCooldownTimer > 0) this.sideCooldownTimer -= deltaTimeMs;
-
-    // Rotação
-    if (input.left) this.currentRotation -= this.rotationSpeed * delta;
-    if (input.right) this.currentRotation += this.rotationSpeed * delta;
-    this.container.rotation = this.currentRotation;
-
-    // Aceleração / Ré
-    if (input.forward) {
-      this.speed += this.acceleration * delta;
-      if (this.speed > this.maxSpeed) this.speed = this.maxSpeed;
-    } else if (input.backward) {
-      this.speed -= this.acceleration * 0.6 * delta;
-      if (this.speed < this.reverseMaxSpeed) this.speed = this.reverseMaxSpeed;
-    } else {
-      this.speed *= Math.pow(this.friction, delta);
-      if (Math.abs(this.speed) < 0.01) this.speed = 0;
-    }
-
-    // Movimentação do navio na direção da rotação
-    const movementAngle = this.currentRotation + Math.PI / 2;
-    this.container.x += Math.cos(movementAngle) * this.speed * delta;
-    this.container.y += Math.sin(movementAngle) * this.speed * delta;
-
-    // Restrição aos limites da Arena
-    const margin = 32;
-    if (this.container.x < margin) this.container.x = margin;
-    if (this.container.x > screenWidth - margin)
-      this.container.x = screenWidth - margin;
-    if (this.container.y < margin) this.container.y = margin;
-    if (this.container.y > screenHeight - margin)
-      this.container.y = screenHeight - margin;
-
-    // --- Disparo Frontal ---
-    if (input.fire && this.frontCooldownTimer <= 0) {
-      this.frontCooldownTimer = this.FRONT_COOLDOWN;
-      const frontOffset = 25;
-      firedProjectiles.push({
-        x: this.container.x + Math.cos(movementAngle) * frontOffset,
-        y: this.container.y + Math.sin(movementAngle) * frontOffset,
-        angle: movementAngle,
-        isPlayer: true,
-        damage: 25,
-        speed: 9,
-        lifetime: 120,
-      });
-    }
-
-    // --- Disparo Lateral Esquerdo (Q) ---
-    if (input.fireLeft && this.sideCooldownTimer <= 0) {
-      this.sideCooldownTimer = this.SIDE_COOLDOWN;
-      const sideAngle = movementAngle - Math.PI / 2;
-      const offsets = [-15, 0, 15]; // 3 disparos paralelos ao longo do casco
-      offsets.forEach((offset) => {
-        firedProjectiles.push({
-          x:
-            this.container.x +
-            Math.cos(movementAngle) * offset +
-            Math.cos(sideAngle) * 15,
-          y:
-            this.container.y +
-            Math.sin(movementAngle) * offset +
-            Math.sin(sideAngle) * 15,
-          angle: sideAngle,
-          isPlayer: true,
-          damage: 20,
-          speed: 8,
-          lifetime: 100,
-        });
-      });
-    }
-
-    // --- Disparo Lateral Direito (E) ---
-    if (input.fireRight && this.sideCooldownTimer <= 0) {
-      this.sideCooldownTimer = this.SIDE_COOLDOWN;
-      const sideAngle = movementAngle + Math.PI / 2;
-      const offsets = [-15, 0, 15]; // 3 disparos paralelos ao longo do casco
-      offsets.forEach((offset) => {
-        firedProjectiles.push({
-          x:
-            this.container.x +
-            Math.cos(movementAngle) * offset +
-            Math.cos(sideAngle) * 15,
-          y:
-            this.container.y +
-            Math.sin(movementAngle) * offset +
-            Math.sin(sideAngle) * 15,
-          angle: sideAngle,
-          isPlayer: true,
-          damage: 20,
-          speed: 8,
-          lifetime: 100,
-        });
-      });
-    }
-
-    return firedProjectiles;
+  public destroy() {
+    this.visual.destroy();
   }
 }

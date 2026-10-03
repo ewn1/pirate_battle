@@ -1,248 +1,331 @@
-import { useState } from "react";
+/**
+ * [OPTIONS]
+ * "Game session time" (60-180 s) and "Enemy spawn time" (0.5-10 s) with
+ * validation, explicit saving and persistence (localStorage via the store).
+ *
+ * Each input is a labelled text field with +/- steppers. Errors are
+ * announced (role="alert") and linked with aria-describedby / aria-invalid.
+ * Saved values apply to the NEXT match only.
+ */
+import { useRef, useState, type FormEvent, type Ref } from "react";
 import { useNavigate } from "react-router-dom";
 import styled from "styled-components";
-import { useGameStore } from "../store/useGameStore";
-import { Panel } from "../components/ui/Panel";
 import { Button } from "../components/ui/Button";
+import { Page, Panel, PanelText, PanelTitle } from "../components/ui/Panel";
+import { LIMITS } from "../game/config/GameConfig";
+import { useGameStore } from "../store/useGameStore";
+import { formatSeconds } from "../utils/format";
 
-const Title = styled.h2`
-  font-size: 2rem;
-  margin-bottom: 20px;
-  text-shadow: 2px 2px 4px #000;
-  text-transform: uppercase;
-  letter-spacing: 2px;
-  color: #fff;
-  text-align: center;
-`;
+/* -------------------------------------------------------------------------- */
+/* [VALIDATION]                                                               */
+/* -------------------------------------------------------------------------- */
 
-const InputGroup = styled.div`
+const SESSION = LIMITS.sessionTimeSec;
+const SPAWN_SEC = {
+  min: LIMITS.spawnIntervalMs.min / 1000,
+  max: LIMITS.spawnIntervalMs.max / 1000,
+};
+const SESSION_STEP = 10;
+const SPAWN_STEP = 0.5;
+
+function parseNumber(raw: string): number | null {
+  const text = raw.trim().replace(",", ".");
+  if (text === "") return null;
+  const value = Number(text);
+  return Number.isFinite(value) ? value : null;
+}
+
+function validateSessionTime(raw: string): string | null {
+  const value = parseNumber(raw);
+  if (value === null) return "Enter the game session time in seconds.";
+  if (!Number.isInteger(value)) return "Game session time must be a whole number of seconds.";
+  if (value < SESSION.min || value > SESSION.max) {
+    return `Game session time must be between ${SESSION.min} and ${SESSION.max} seconds.`;
+  }
+  return null;
+}
+
+function validateSpawnTime(raw: string): string | null {
+  const value = parseNumber(raw);
+  if (value === null) return "Enter the enemy spawn time in seconds.";
+  if (value <= 0) return "Enemy spawn time must be greater than zero.";
+  if (value < SPAWN_SEC.min || value > SPAWN_SEC.max) {
+    return `Enemy spawn time must be between ${SPAWN_SEC.min} and ${SPAWN_SEC.max} seconds.`;
+  }
+  return null;
+}
+
+/* -------------------------------------------------------------------------- */
+/* [STYLES]                                                                   */
+/* -------------------------------------------------------------------------- */
+
+const Form = styled.form`
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 10px;
+  gap: 14px;
   width: 100%;
-  margin-bottom: 20px;
+`;
+
+const Field = styled.div`
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
 `;
 
 const Label = styled.label`
-  font-size: 1.1rem;
-  font-weight: bold;
-  text-shadow: 1px 1px 2px #000;
-  color: #fff;
-  text-align: center;
+  font-size: 1rem;
+  font-weight: 700;
+  text-shadow: 0 2px 0 #000;
 `;
 
-const StepperContainer = styled.div`
+const Row = styled.div`
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 16px;
-  width: 100%;
+  gap: 12px;
 `;
 
-const RoundButton = styled.button`
+const Round = styled.button`
   width: 48px;
   height: 48px;
   border: none;
-  background: transparent
-    url("/assets/png/default/ui/controls/button_round_normal.png") no-repeat
-    center / contain;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  background: url("/assets/png/default/ui/controls/button_round_normal.png") center / contain
+    no-repeat;
+  display: grid;
+  place-items: center;
   cursor: pointer;
-  outline: none;
-  transition:
-    transform 0.1s ease,
-    filter 0.1s ease;
-
-  &:hover:not(:disabled) {
-    background-image: url("/assets/png/default/ui/controls/button_round_hover.png");
-  }
+  touch-action: manipulation;
 
   &:active:not(:disabled) {
     background-image: url("/assets/png/default/ui/controls/button_round_pressed.png");
-    transform: scale(0.95);
   }
-
-  &:focus-visible {
-    filter: drop-shadow(0 0 4px #ffcc00);
-  }
-
   &:disabled {
     opacity: 0.4;
     cursor: not-allowed;
   }
+  img {
+    width: 20px;
+    height: 20px;
+  }
 `;
 
-const ButtonIcon = styled.img`
-  width: 20px;
-  height: 20px;
-  user-select: none;
-  pointer-events: none;
-`;
-
-const ValueBox = styled.div`
-  background: rgba(0, 0, 0, 0.5);
-  border: 2px solid rgba(255, 255, 255, 0.2);
+const Input = styled.input`
+  width: 120px;
+  height: 44px;
+  padding: 0 8px;
+  border: 2px solid #4b6f91;
   border-radius: 8px;
-  padding: 8px 16px;
-  min-width: 120px;
+  background: #0b2238;
+  color: #ffd166;
+  font: inherit;
+  font-size: 1.2rem;
+  font-weight: 800;
   text-align: center;
-  font-size: 1.25rem;
-  font-weight: bold;
-  color: #ffcc00;
-  text-shadow: 1px 1px 2px #000;
-  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.6);
+
+  &[aria-invalid="true"] {
+    border-color: #ff6b6b;
+  }
 `;
 
-const ErrorMessage = styled.span`
-  color: #ff4d4d;
-  font-size: 0.95rem;
-  font-weight: bold;
-  text-shadow: 1px 1px 2px #000;
+const Hint = styled.p`
+  font-size: 0.8rem;
+  color: #c4d4e3;
+`;
+
+const ErrorText = styled.p`
+  min-height: 1.2em;
+  font-size: 0.85rem;
+  font-weight: 700;
   text-align: center;
-  min-height: 20px;
+  color: #ff9b9b;
 `;
 
-const ButtonGroup = styled.div`
-  display: flex;
-  gap: 20px;
-  margin-top: 15px;
-  justify-content: center;
+const Saved = styled.p`
+  min-height: 1.2em;
+  font-weight: 700;
+  color: #8de0a0;
 `;
 
-export const Options = () => {
+/* -------------------------------------------------------------------------- */
+/* [STEPPER FIELD]                                                            */
+/* -------------------------------------------------------------------------- */
+
+interface NumberFieldProps {
+  id: string;
+  label: string;
+  unit: string;
+  hint: string;
+  value: string;
+  error: string | null;
+  onChange: (value: string) => void;
+  onStep: (direction: -1 | 1) => void;
+  inputRef: Ref<HTMLInputElement>;
+}
+
+function NumberField({
+  id,
+  label,
+  unit,
+  hint,
+  value,
+  error,
+  onChange,
+  onStep,
+  inputRef,
+}: NumberFieldProps) {
+  return (
+    <Field>
+      <Label htmlFor={id}>
+        {label} ({unit})
+      </Label>
+      <Row>
+        <Round
+          type="button"
+          onClick={() => onStep(-1)}
+          aria-label={`Decrease ${label.toLowerCase()}`}
+          data-testid={`${id}-minus`}
+        >
+          <img src="/assets/png/default/ui/controls/icon_minus.png" alt="" />
+        </Round>
+        <Input
+          id={id}
+          ref={inputRef}
+          type="text"
+          inputMode="decimal"
+          autoComplete="off"
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          aria-invalid={error !== null}
+          aria-describedby={`${id}-hint ${id}-error`}
+        />
+        <Round
+          type="button"
+          onClick={() => onStep(1)}
+          aria-label={`Increase ${label.toLowerCase()}`}
+          data-testid={`${id}-plus`}
+        >
+          <img src="/assets/png/default/ui/controls/icon_plus.png" alt="" />
+        </Round>
+      </Row>
+      <Hint id={`${id}-hint`}>{hint}</Hint>
+      <ErrorText id={`${id}-error`} role="alert">
+        {error}
+      </ErrorText>
+    </Field>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* [PAGE]                                                                     */
+/* -------------------------------------------------------------------------- */
+
+export function Options() {
   const navigate = useNavigate();
-  const { sessionTime, enemySpawnTime, setSessionTime, setEnemySpawnTime } =
-    useGameStore();
+  const sessionTimeSec = useGameStore((state) => state.sessionTimeSec);
+  const spawnIntervalMs = useGameStore((state) => state.spawnIntervalMs);
+  const setOptions = useGameStore((state) => state.setOptions);
 
-  const [localSessionTime, setLocalSessionTime] = useState<number>(sessionTime);
-  const [localSpawnTime, setLocalSpawnTime] = useState<number>(enemySpawnTime);
-  const [error, setError] = useState<string>("");
+  const [sessionRaw, setSessionRaw] = useState(String(sessionTimeSec));
+  const [spawnRaw, setSpawnRaw] = useState(formatSeconds(spawnIntervalMs));
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  const [spawnError, setSpawnError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
 
-  const MIN_SESSION_TIME = 60;
-  const MAX_SESSION_TIME = 180;
-  const SESSION_STEP = 10;
+  const sessionInput = useRef<HTMLInputElement>(null);
+  const spawnInput = useRef<HTMLInputElement>(null);
 
-  const MIN_SPAWN_TIME = 500;
-  const SPAWN_STEP = 100;
-
-  const handleSessionChange = (delta: number) => {
-    setLocalSessionTime((prev) => {
-      const next = prev + delta;
-      if (next < MIN_SESSION_TIME) return MIN_SESSION_TIME;
-      if (next > MAX_SESSION_TIME) return MAX_SESSION_TIME;
-      return next;
-    });
+  const edit = (setter: (value: string) => void) => (value: string) => {
+    setter(value);
+    setSaved(false);
   };
 
-  const handleSpawnChange = (delta: number) => {
-    setLocalSpawnTime((prev) => {
-      const next = prev + delta;
-      if (next < MIN_SPAWN_TIME) return MIN_SPAWN_TIME;
-      return next;
-    });
+  const stepSession = (direction: -1 | 1) => {
+    const current = parseNumber(sessionRaw) ?? sessionTimeSec;
+    const next = Math.min(SESSION.max, Math.max(SESSION.min, Math.round(current) + direction * SESSION_STEP));
+    setSessionRaw(String(next));
+    setSessionError(null);
+    setSaved(false);
   };
 
-  const handleSave = () => {
-    if (
-      localSessionTime < MIN_SESSION_TIME ||
-      localSessionTime > MAX_SESSION_TIME
-    ) {
-      setError(
-        `Match duration must be between ${MIN_SESSION_TIME} and ${MAX_SESSION_TIME} seconds.`,
-      );
-      return;
-    }
+  const stepSpawn = (direction: -1 | 1) => {
+    const current = parseNumber(spawnRaw) ?? spawnIntervalMs / 1000;
+    const next = Math.min(SPAWN_SEC.max, Math.max(SPAWN_SEC.min, current + direction * SPAWN_STEP));
+    setSpawnRaw(String(Number(next.toFixed(2))));
+    setSpawnError(null);
+    setSaved(false);
+  };
 
-    if (localSpawnTime < MIN_SPAWN_TIME) {
-      setError(`Enemy spawn rate must be at least ${MIN_SPAWN_TIME}ms.`);
-      return;
-    }
+  const handleSubmit = (event: FormEvent) => {
+    event.preventDefault();
+    const sessionProblem = validateSessionTime(sessionRaw);
+    const spawnProblem = validateSpawnTime(spawnRaw);
+    setSessionError(sessionProblem);
+    setSpawnError(spawnProblem);
 
-    setError("");
-    setSessionTime(localSessionTime);
-    setEnemySpawnTime(localSpawnTime);
+    if (sessionProblem) return sessionInput.current?.focus();
+    if (spawnProblem) return spawnInput.current?.focus();
 
-    navigate("/");
+    const sessionValue = parseNumber(sessionRaw) as number;
+    const spawnValue = parseNumber(spawnRaw) as number;
+    setOptions({
+      sessionTimeSec: sessionValue,
+      spawnIntervalMs: Math.round(spawnValue * 1000),
+    });
+    setSessionRaw(String(sessionValue));
+    setSpawnRaw(String(Number(spawnValue.toFixed(2))));
+    setSaved(true);
   };
 
   return (
-    <Panel>
-      <Title>Options</Title>
+    <Page>
+      <Panel aria-labelledby="options-title">
+        <PanelTitle id="options-title">Options</PanelTitle>
+        <PanelText>Changes apply to your next match.</PanelText>
 
-      <InputGroup>
-        <Label>Match Duration</Label>
-        <StepperContainer>
-          <RoundButton
+        <Form onSubmit={handleSubmit} noValidate>
+          <NumberField
+            id="session-time"
+            label="Game session time"
+            unit="seconds"
+            hint={`Between ${SESSION.min} and ${SESSION.max} seconds.`}
+            value={sessionRaw}
+            error={sessionError}
+            onChange={edit(setSessionRaw)}
+            onStep={stepSession}
+            inputRef={sessionInput}
+          />
+          <NumberField
+            id="spawn-time"
+            label="Enemy spawn time"
+            unit="seconds"
+            hint={`Between ${SPAWN_SEC.min} and ${SPAWN_SEC.max} seconds.`}
+            value={spawnRaw}
+            error={spawnError}
+            onChange={edit(setSpawnRaw)}
+            onStep={stepSpawn}
+            inputRef={spawnInput}
+          />
+
+          <Saved role="status" data-testid="options-saved">
+            {saved ? "Options saved." : ""}
+          </Saved>
+
+          <Button type="submit" data-testid="save-options">
+            Save
+          </Button>
+          <Button
             type="button"
-            onClick={() => handleSessionChange(-SESSION_STEP)}
-            disabled={localSessionTime <= MIN_SESSION_TIME}
-            aria-label="Decrease match duration"
+            $variant="secondary"
+            onClick={() => navigate("/")}
+            data-sound="back"
+            data-testid="options-back"
           >
-            <ButtonIcon
-              src="/assets/png/default/ui/controls/icon_minus.png"
-              alt="Minus"
-            />
-          </RoundButton>
-
-          <ValueBox>{localSessionTime}s</ValueBox>
-
-          <RoundButton
-            type="button"
-            onClick={() => handleSessionChange(SESSION_STEP)}
-            disabled={localSessionTime >= MAX_SESSION_TIME}
-            aria-label="Increase match duration"
-          >
-            <ButtonIcon
-              src="/assets/png/default/ui/controls/icon_plus.png"
-              alt="Plus"
-            />
-          </RoundButton>
-        </StepperContainer>
-      </InputGroup>
-
-      <InputGroup>
-        <Label>Enemy Spawn Rate</Label>
-        <StepperContainer>
-          <RoundButton
-            type="button"
-            onClick={() => handleSpawnChange(-SPAWN_STEP)}
-            disabled={localSpawnTime <= MIN_SPAWN_TIME}
-            aria-label="Decrease enemy spawn rate"
-          >
-            <ButtonIcon
-              src="/assets/png/default/ui/controls/icon_minus.png"
-              alt="Minus"
-            />
-          </RoundButton>
-
-          <ValueBox>{localSpawnTime}ms</ValueBox>
-
-          <RoundButton
-            type="button"
-            onClick={() => handleSpawnChange(SPAWN_STEP)}
-            aria-label="Increase enemy spawn rate"
-          >
-            <ButtonIcon
-              src="/assets/png/default/ui/controls/icon_plus.png"
-              alt="Plus"
-            />
-          </RoundButton>
-        </StepperContainer>
-      </InputGroup>
-
-      <ErrorMessage>{error}</ErrorMessage>
-
-      <ButtonGroup>
-        <Button onClick={() => navigate("/")} tabIndex={2}>
-          Back
-        </Button>
-        <Button onClick={handleSave} tabIndex={1}>
-          Save
-        </Button>
-      </ButtonGroup>
-    </Panel>
+            Main menu
+          </Button>
+        </Form>
+      </Panel>
+    </Page>
   );
-};
+}

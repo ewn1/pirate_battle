@@ -1,29 +1,85 @@
+/**
+ * [OPTIONS STORE]
+ * Player-editable options + the persistent anonymous player identity.
+ * Persisted in localStorage so everything survives a refresh.
+ *
+ * Match configuration is copied from here ONCE, when a match starts
+ * (see GameView), so changing options never affects a running match.
+ */
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import {
+  clampSessionTime,
+  clampSpawnInterval,
+  DEFAULT_SESSION_TIME_SEC,
+  DEFAULT_SPAWN_INTERVAL_MS,
+  type ConfigSnapshot,
+} from "../game/config/GameConfig";
+import { generateId } from "../game/utils/Random";
+import { captainNameFor } from "../utils/captainName";
 
-interface GameState {
-  // Configurações da partida
-  sessionTime: number; // Em segundos (limites: 60 a 180)
-  enemySpawnTime: number; // Em milissegundos
+export const OPTIONS_STORAGE_KEY = "pirate-battle:options:v1";
 
-  // Ações
-  setSessionTime: (time: number) => void;
-  setEnemySpawnTime: (time: number) => void;
+interface OptionsState {
+  sessionTimeSec: number;
+  spawnIntervalMs: number;
+  /** Anonymous, persistent identity of this browser's player. */
+  playerId: string;
+  playerName: string;
+  setOptions: (options: ConfigSnapshot) => void;
 }
 
-export const useGameStore = create<GameState>()(
+export const useGameStore = create<OptionsState>()(
   persist(
-    (set) => ({
-      // Valores padrão de inicialização
-      sessionTime: 60,
-      enemySpawnTime: 1000,
-
-      // Funções para atualizar o estado
-      setSessionTime: (time) => set({ sessionTime: time }),
-      setEnemySpawnTime: (time) => set({ enemySpawnTime: time }),
-    }),
+    (set) => {
+      const playerId = generateId();
+      return {
+        sessionTimeSec: DEFAULT_SESSION_TIME_SEC,
+        spawnIntervalMs: DEFAULT_SPAWN_INTERVAL_MS,
+        playerId,
+        playerName: captainNameFor(playerId),
+        setOptions: (options) =>
+          set({
+            sessionTimeSec: clampSessionTime(options.sessionTimeSec),
+            spawnIntervalMs: clampSpawnInterval(options.spawnIntervalMs),
+          }),
+      };
+    },
     {
-      name: "pirate-battle-config", // Nome da chave que ficará salva no localStorage
+      name: OPTIONS_STORAGE_KEY,
+      version: 1,
+      // Only data is persisted, never the action functions.
+      partialize: (state) => ({
+        sessionTimeSec: state.sessionTimeSec,
+        spawnIntervalMs: state.spawnIntervalMs,
+        playerId: state.playerId,
+        playerName: state.playerName,
+      }),
+      // Corrupted or hand-edited storage is clamped back into valid limits.
+      merge: (persisted, current) => {
+        const saved = (persisted ?? {}) as Partial<OptionsState>;
+        return {
+          ...current,
+          sessionTimeSec: clampSessionTime(
+            Number(saved.sessionTimeSec ?? current.sessionTimeSec),
+          ),
+          spawnIntervalMs: clampSpawnInterval(
+            Number(saved.spawnIntervalMs ?? current.spawnIntervalMs),
+          ),
+          playerId:
+            typeof saved.playerId === "string" && saved.playerId
+              ? saved.playerId
+              : current.playerId,
+          playerName:
+            typeof saved.playerName === "string" && saved.playerName
+              ? saved.playerName
+              : current.playerName,
+        };
+      },
     },
   ),
 );
+
+// Write the generated identity immediately so it is stable across refreshes
+// even if the player never opens the Options screen.
+useGameStore.setState({});

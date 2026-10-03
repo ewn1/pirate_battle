@@ -1,693 +1,888 @@
+/**
+ * [GAME ENGINE]
+ * Owns one match from asset loading to game over.
+ *
+ * Responsibilities (kept deliberately separate):
+ *   - SIMULATION : fixed 1/60 s steps -> movement, combat, spawns, scoring.
+ *                  Time-based, so results do not depend on the frame rate.
+ *   - RENDERING  : entities push their state into Pixi views once per frame.
+ *   - INPUT      : InputManager (keyboard + touch) -> ActionState.
+ *   - UI SYNC    : discrete callbacks (only when a value changes) so React
+ *                  never re-renders on every frame.
+ *
+ * Lifecycle: `new GameEngine()` -> `init(container)` -> (running/paused) ->
+ * `destroy()`. `destroy()` is safe at any point (React Strict Mode mounts,
+ * unmounts and re-mounts effects) and releases ticker, listeners, entities
+ * and the Pixi application. Textures stay in Pixi's shared cache.
+ */
 import {
   Application,
-  Assets,
-  Ticker,
+  Container,
+  Graphics,
   Sprite,
   TilingSprite,
-  Container,
+  type Ticker,
 } from "pixi.js";
-import { Player } from "../entities/Player";
-import { Projectile } from "../entities/Projectile";
+import type { ConfigSnapshot, GameConfig } from "../config/GameConfig";
 import { Enemy, type EnemyType } from "../entities/Enemy";
+import { Player } from "../entities/Player";
+import { Projectile, type ProjectileSpec } from "../entities/Projectile";
+import { EffectsSystem } from "../systems/EffectsSystem";
 import { EnemySpawner } from "../systems/EnemySpawner";
-import { InputManager } from "../utils/InputManager";
-import { checkCollision } from "../utils/Collision";
-import { DEFAULT_GAME_CONFIG, type GameConfig } from "../config/GameConfig";
+import {
+  circlesOverlap,
+  resolveIslandCollision,
+  type Circle,
+} from "../utils/Collision";
+import { InputManager, type GameAction } from "../utils/InputManager";
+import { generateId, Rng } from "../utils/Random";
+import { PerfProbe } from "../testing/perfProbe";
+import { registerTestApi, unregisterTestApi } from "../testing/testHooks";
 import { soundManager } from "../../services/audio/SoundManager";
+import { runtimeParams } from "../../services/runtimeParams";
+import { getTexture, loadGameAssets } from "./assetManifest";
+import type {
+  EndReason,
+  EngineStatus,
+  MatchResult,
+  PauseReason,
+} from "./types";
 
+/* -------------------------------------------------------------------------- */
+/* [CONSTANTS]                                                                */
+/* -------------------------------------------------------------------------- */
+
+/** Fixed simulation step (s). */
+const FIXED_STEP = 1 / 60;
+/** Frames longer than this are clamped (tab was throttled, debugger, etc.). */
+const MAX_FRAME_DT = 0.25;
+/** Safety valve against the "spiral of death". */
+const MAX_STEPS_PER_FRAME = 8;
+const LOW_HEALTH_RATIO = 0.25;
+const TIME_WARNING_SECONDS = 10;
+const AUDIO_PRELOAD_TIMEOUT_MS = 4000;
+
+/** Islands in logical arena coordinates (the arena is 1280x720). */
+interface IslandDefinition extends Circle {
+  /** Tile aliases laid out in a grid, centred on the island. */
+  grid: string[][];
+}
+
+const ISLANDS: IslandDefinition[] = [
+  {
+    x: 640,
+    y: 210,
+    radius: 78,
+    grid: [
+      ["tile_1", "tile_2", "tile_3"],
+      ["tile_33", "tile_34", "tile_35"],
+    ],
+  },
+  {
+    x: 1000,
+    y: 445,
+    radius: 95,
+    grid: [
+      ["tile_6", "tile_7", "tile_9"],
+      ["tile_22", "tile_24", "tile_25"],
+      ["tile_54", "tile_55", "tile_57"],
+    ],
+  },
+  {
+    x: 486,
+    y: 590,
+    radius: 62,
+    grid: [
+      ["tile_77", "tile_78"],
+      ["tile_93", "tile_94"],
+    ],
+  },
+];
+
+const TILE_SIZE = 64;
+const PLAYER_START = { x: 240, y: 360 };
+
+/* -------------------------------------------------------------------------- */
+/* [PUBLIC TYPES]                                                             */
+/* -------------------------------------------------------------------------- */
+
+/** Discrete notifications for the React layer (never fired per frame). */
 export interface GameCallbacks {
+  onLoadProgress?: (ratio: number) => void;
   onHealthChange?: (health: number, maxHealth: number) => void;
   onScoreChange?: (score: number) => void;
-  onTimeChange?: (timeRemaining: number) => void;
-  onPauseChange?: (isPaused: boolean) => void;
-  onGameOver?: (finalScore: number, survived: boolean) => void;
+  /** Whole seconds remaining; fires only when the displayed value changes. */
+  onTimeChange?: (secondsRemaining: number) => void;
+  onPauseChange?: (paused: boolean, reason: PauseReason | null) => void;
+  onGameOver?: (result: MatchResult) => void;
 }
 
-export interface Island {
-  x: number;
-  y: number;
-  radius: number;
+export interface EngineOptions {
+  /** Immutable snapshot of the configuration for THIS match. */
+  config: GameConfig;
+  seed: number;
+  callbacks?: GameCallbacks;
+  /** Disconnect the ticker from the simulation (tests drive time via step()). */
+  manualClock?: boolean;
 }
 
-interface EntityWithSpeed {
-  speed?: number;
+/** Plain-JSON view of the simulation, used by tests and debugging. */
+export interface EngineSnapshot {
+  status: EngineStatus;
+  seed: number;
+  matchId: string;
+  timeRemaining: number;
+  elapsed: number;
+  score: number;
+  arena: { width: number; height: number };
+  islands: Circle[];
+  player: {
+    x: number;
+    y: number;
+    heading: number;
+    speed: number;
+    health: number;
+    maxHealth: number;
+    cooldowns: { front: number; left: number; right: number };
+  };
+  enemies: Array<{
+    id: number;
+    type: EnemyType;
+    x: number;
+    y: number;
+    health: number;
+    alive: boolean;
+  }>;
+  projectiles: { player: number; enemy: number };
+  counts: { enemiesAlive: number; effects: number; spawned: number };
+  result: MatchResult | null;
 }
 
-export function checkIslandCollision(
-  entityX: number,
-  entityY: number,
-  entityRadius: number,
-  island: Island,
-): boolean {
-  const dx = entityX - island.x;
-  const dy = entityY - island.y;
-  const distance = Math.sqrt(dx * dx + dy * dy);
-  return distance < entityRadius + island.radius;
-}
-
-export function resolveIslandCollision(
-  ship: { x: number; y: number; speed?: number; radius: number },
-  island: Island,
-) {
-  const dx = ship.x - island.x;
-  const dy = ship.y - island.y;
-  const distance = Math.sqrt(dx * dx + dy * dy);
-  const minDistance = ship.radius + island.radius;
-
-  if (distance < minDistance && distance > 0) {
-    const overlap = minDistance - distance;
-    const nx = dx / distance;
-    const ny = dy / distance;
-
-    ship.x += nx * overlap;
-    ship.y += ny * overlap;
-    if (ship.speed !== undefined) {
-      ship.speed = 0;
-    }
-  }
-}
+/* -------------------------------------------------------------------------- */
+/* [ENGINE]                                                                   */
+/* -------------------------------------------------------------------------- */
 
 export class GameEngine {
-  private app: Application;
+  private readonly config: GameConfig;
+  private readonly seed: number;
+  private readonly callbacks: GameCallbacks;
+  private readonly manualClock: boolean;
+  private readonly matchId = generateId();
+  private readonly rng: Rng;
+
+  private readonly app = new Application();
+  private appReady = false;
+  private destroyed = false;
+  private status: EngineStatus = "loading";
+
+  /* Scene graph */
+  private readonly world = new Container();
+  private readonly shipLayer = new Container();
+  private readonly projectileLayer = new Container();
+  private readonly effects = new EffectsSystem();
+  private worldOrigin = { x: 0, y: 0 };
+
+  /* Simulation state */
+  private readonly input = new InputManager();
+  private spawner: EnemySpawner;
   private player: Player | null = null;
-  private playerHealth: number = 100;
-  private projectiles: Projectile[] = [];
-  private enemyProjectiles: Projectile[] = [];
   private enemies: Enemy[] = [];
-  private enemySpawner: EnemySpawner;
-  private inputManager: InputManager;
-  private config: GameConfig;
-  private callbacks: GameCallbacks;
-
-  private backgroundTile: TilingSprite | null = null;
-  private islandsData: Island[] = [];
-  private islandContainer: Container | null = null;
-
-  private frontalCooldown: number = 0;
-  private broadsideLeftCooldown: number = 0;
-  private broadsideRightCooldown: number = 0;
-
-  private isInitialized = false;
-  private isDestroyed = false;
-  private isPaused = false;
-  private isGameOver = false;
-
+  private projectiles: Projectile[] = [];
+  private islands: Circle[] = [];
+  private nextEntityId = 1;
+  private accumulator = 0;
+  private stepCount = 0;
+  private elapsed = 0;
+  private timeRemaining: number;
   private score = 0;
-  private timeRemaining = 0;
+  private kills = 0;
+  private pendingEnd: EndReason | null = null;
+  private result: MatchResult | null = null;
 
-  private handleBlur: () => void;
-  private handleVisibilityChange: () => void;
+  /* UI sync bookkeeping */
+  private lastEmittedSecond = -1;
+  private timeWarningPlayed = false;
+  private lowHealthPlayed = false;
+  private cameraShake = 0;
 
-  constructor(
-    config: GameConfig = DEFAULT_GAME_CONFIG,
-    callbacks: GameCallbacks = {},
-  ) {
-    this.app = new Application();
-    this.config = config;
-    this.callbacks = callbacks;
-    this.inputManager = new InputManager();
-    this.enemySpawner = new EnemySpawner(config.enemySpawnInterval);
-    this.timeRemaining = config.gameDuration;
-    this.playerHealth = config.playerMaxHealth;
+  /* Optional profiling */
+  private readonly perf = runtimeParams.perf ? new PerfProbe() : null;
 
-    this.handleBlur = () => this.pauseGame();
-    this.handleVisibilityChange = () => {
-      if (document.hidden) this.pauseGame();
-    };
+  constructor(options: EngineOptions) {
+    this.config = options.config;
+    this.seed = options.seed;
+    this.callbacks = options.callbacks ?? {};
+    this.manualClock = options.manualClock ?? false;
+    this.rng = new Rng(options.seed);
+    this.spawner = new EnemySpawner(this.config, this.rng);
+    this.timeRemaining = this.config.gameDuration;
   }
 
-  public async init(container: HTMLDivElement) {
+  /* ------------------------------------------------------------------------ */
+  /* [LIFECYCLE]                                                              */
+  /* ------------------------------------------------------------------------ */
+
+  /**
+   * Creates the Pixi app, loads every asset (reporting progress) and starts
+   * the match. Rejects if assets fail so the UI can offer a retry; call
+   * `destroy()` before creating a new engine.
+   */
+  public async init(container: HTMLElement): Promise<void> {
     await this.app.init({
       resizeTo: container,
-      backgroundColor: 0x1099bb,
+      background: 0x0a2a43,
+      antialias: true,
+      // Cap the density: 3x phones do not need 3x pixels for this art style.
+      resolution: Math.min(window.devicePixelRatio || 1, 2),
+      autoDensity: true,
     });
 
-    this.isInitialized = true;
-
-    if (this.isDestroyed) {
-      this.app.destroy({ removeView: true });
+    // destroy() ran while Pixi was still initialising (Strict Mode).
+    if (this.destroyed) {
+      this.app.destroy({ removeView: true }, { children: true });
       return;
     }
+    this.appReady = true;
 
-    container.appendChild(this.app.canvas);
-    await this.loadAssets();
+    const canvas = this.app.canvas;
+    canvas.style.display = "block";
+    canvas.style.touchAction = "none";
+    canvas.setAttribute("aria-hidden", "true");
+    container.appendChild(canvas);
 
-    if (this.isDestroyed) return;
+    // Textures are required; audio is best effort and never blocks the match.
+    await Promise.all([
+      loadGameAssets((ratio) => this.callbacks.onLoadProgress?.(ratio)),
+      Promise.race([
+        soundManager.preload(),
+        new Promise<void>((resolve) =>
+          setTimeout(resolve, AUDIO_PRELOAD_TIMEOUT_MS),
+        ),
+      ]),
+    ]);
+    if (this.destroyed) return;
 
-    this.setupScene();
-    this.setupEventListeners();
-    soundManager.playBGM();
-    this.startGameLoop();
-
-    this.callbacks.onHealthChange?.(
-      this.playerHealth,
-      this.config.playerMaxHealth,
-    );
-    this.callbacks.onScoreChange?.(this.score);
-    this.callbacks.onTimeChange?.(this.timeRemaining);
-  }
-
-  private setupEventListeners() {
+    this.buildScene();
+    this.layout();
+    this.app.renderer.on("resize", this.layout);
     window.addEventListener("blur", this.handleBlur);
-    document.addEventListener("visibilitychange", this.handleVisibilityChange);
-  }
+    document.addEventListener("visibilitychange", this.handleVisibility);
 
-  private removeEventListeners() {
-    window.removeEventListener("blur", this.handleBlur);
-    document.removeEventListener(
-      "visibilitychange",
-      this.handleVisibilityChange,
-    );
-  }
+    this.status = "running";
+    this.input.setEnabled(true);
+    this.app.ticker.add(this.onTick);
 
-  public pauseGame() {
-    if (this.isGameOver || this.isPaused) return;
-    this.isPaused = true;
-    soundManager.stopBGM();
-    this.callbacks.onPauseChange?.(true);
-  }
+    soundManager.play("game_start");
+    this.startAudioLoops();
 
-  public resumeGame() {
-    if (this.isGameOver || !this.isPaused) return;
-    this.isPaused = false;
-    soundManager.playBGM();
-    this.callbacks.onPauseChange?.(false);
-  }
-
-  public togglePause() {
-    if (this.isPaused) this.resumeGame();
-    else this.pauseGame();
-  }
-
-  private async loadAssets() {
-    try {
-      const islandTileIds = [
-        1,
-        2,
-        3,
-        33,
-        34,
-        35, // Ilha Superior (6 tiles)
-        6,
-        7,
-        9,
-        22,
-        24,
-        25,
-        54,
-        55,
-        57, // Ilha Direita (9 tiles)
-        77,
-        78,
-        93,
-        94, // Ilha Inferior Esquerda (4 tiles)
-      ];
-
-      const islandAssets = islandTileIds.map((id) => ({
-        alias: `tile_${id}`,
-        src: `/assets/png/default/tiles/tile_${id}.png`,
-      }));
-
-      const assetsToLoad = [
-        { alias: "ship_1", src: "/assets/png/default/ships/ship_1.png" },
-        { alias: "ship_2", src: "/assets/png/default/ships/ship_2.png" },
-        { alias: "ship_3", src: "/assets/png/default/ships/ship_3.png" },
-        { alias: "ship_4", src: "/assets/png/default/ships/ship_4.png" },
-        { alias: "ship_5", src: "/assets/png/default/ships/ship_5.png" },
-        { alias: "ship_21", src: "/assets/png/default/ships/ship_21.png" },
-        {
-          alias: "cannon_ball",
-          src: "/assets/png/default/ship_parts/cannon_ball.png",
-        },
-        {
-          alias: "explosion_effect",
-          src: "/assets/png/default/effects/explosion_1.png",
-        },
-        { alias: "water_tile", src: "/assets/png/default/tiles/tile_73.png" },
-        ...islandAssets,
-      ];
-
-      Assets.addBundle("game-assets", assetsToLoad);
-      await Assets.loadBundle("game-assets");
-    } catch (error) {
-      console.warn("Aviso: Falha ao carregar assets do jogo.", error);
-    }
-  }
-
-  private setupScene() {
-    try {
-      const waterTexture = Assets.get("water_tile");
-      if (waterTexture) {
-        this.backgroundTile = new TilingSprite({
-          texture: waterTexture,
-          width: this.app.screen.width,
-          height: this.app.screen.height,
-        });
-        this.app.stage.addChild(this.backgroundTile);
-      }
-    } catch (e) {
-      console.warn("Textura de fundo não carregada.", e);
-    }
-
-    this.islandsData = [];
-    this.islandContainer = new Container();
-    this.app.stage.addChild(this.islandContainer);
-
-    const sw = this.app.screen.width;
-    const sh = this.app.screen.height;
-
-    const tileSize = 64;
-
-    const islandsLayout = [
-      {
-        x: sw * 0.5,
-        y: sh * 0.28,
-        radius: 70,
-        grid: [
-          ["tile_1", "tile_2", "tile_3"],
-          ["tile_33", "tile_34", "tile_35"],
-        ],
-      },
-      {
-        x: sw * 0.78,
-        y: sh * 0.62,
-        radius: 95,
-        grid: [
-          ["tile_6", "tile_7", "tile_9"],
-          ["tile_22", "tile_24", "tile_25"],
-          ["tile_54", "tile_55", "tile_57"],
-        ],
-      },
-      {
-        x: sw * 0.38,
-        y: sh * 0.82,
-        radius: 55,
-        grid: [
-          ["tile_77", "tile_78"],
-          ["tile_93", "tile_94"],
-        ],
-      },
-    ];
-
-    islandsLayout.forEach((islandDef) => {
-      const singleIslandGroup = new Container();
-      singleIslandGroup.x = islandDef.x;
-      singleIslandGroup.y = islandDef.y;
-
-      const rows = islandDef.grid.length;
-      const cols = islandDef.grid[0].length;
-
-      const totalWidth = cols * tileSize;
-      const totalHeight = rows * tileSize;
-
-      const startX = -totalWidth / 2 + tileSize / 2;
-      const startY = -totalHeight / 2 + tileSize / 2;
-
-      islandDef.grid.forEach((row, rowIndex) => {
-        row.forEach((tileAlias, colIndex) => {
-          try {
-            const texture = Assets.get(tileAlias);
-            if (texture) {
-              const sprite = Sprite.from(texture);
-              sprite.anchor.set(0.5);
-              sprite.x = startX + colIndex * tileSize;
-              sprite.y = startY + rowIndex * tileSize;
-              sprite.width = tileSize;
-              sprite.height = tileSize;
-              singleIslandGroup.addChild(sprite);
-            }
-          } catch (e) {
-            console.warn(`Erro ao carregar tile: ${tileAlias}`, e);
-          }
-        });
-      });
-
-      this.islandContainer!.addChild(singleIslandGroup);
-      this.islandsData.push({
-        x: islandDef.x,
-        y: islandDef.y,
-        radius: islandDef.radius,
-      });
-    });
-
-    this.player = new Player("ship_1", sw * 0.2, sh * 0.5);
-    this.app.stage.addChild(this.player.container);
-  }
-
-  private startGameLoop() {
-    this.app.ticker.add((time: Ticker) => {
-      this.update(time.deltaTime);
-    });
-  }
-
-  private update(delta: number) {
-    if (this.isPaused || this.isGameOver || !this.player) return;
-
-    this.updateTimer(delta);
-
-    const actions = this.inputManager.getActions();
-
-    this.player.update(
-      {
-        forward: actions.forward,
-        backward: actions.backward,
-        left: actions.left,
-        right: actions.right,
-        fire: false,
-        fireLeft: false,
-        fireRight: false,
-      },
-      this.app.screen.width,
-      this.app.screen.height,
-      delta,
-    );
-
-    const playerObj = {
-      x: this.player.container.x,
-      y: this.player.container.y,
-      speed: (this.player as unknown as EntityWithSpeed).speed || 0,
-      radius: 22,
-    };
-
-    for (const island of this.islandsData) {
-      if (
-        checkIslandCollision(playerObj.x, playerObj.y, playerObj.radius, island)
-      ) {
-        resolveIslandCollision(playerObj, island);
-        this.player.container.x = playerObj.x;
-        this.player.container.y = playerObj.y;
-      }
-    }
-
-    if (this.backgroundTile) {
-      this.backgroundTile.width = this.app.screen.width;
-      this.backgroundTile.height = this.app.screen.height;
-    }
-
-    const deltaMs = delta * (1000 / 60);
-
-    if (this.frontalCooldown > 0) this.frontalCooldown -= deltaMs;
-    if (this.broadsideLeftCooldown > 0) this.broadsideLeftCooldown -= deltaMs;
-    if (this.broadsideRightCooldown > 0) this.broadsideRightCooldown -= deltaMs;
-
-    if (actions.fireFrontal && this.frontalCooldown <= 0) {
-      this.fireFrontalCannon();
-      this.frontalCooldown = this.config.frontalCooldown;
-    }
-
-    if (actions.fireBroadsideLeft && this.broadsideLeftCooldown <= 0) {
-      this.fireBroadsideCannon("left");
-      this.broadsideLeftCooldown = this.config.broadsideCooldown;
-    }
-
-    if (actions.fireBroadsideRight && this.broadsideRightCooldown <= 0) {
-      this.fireBroadsideCannon("right");
-      this.broadsideRightCooldown = this.config.broadsideCooldown;
-    }
-
-    // [CORREÇÃO DO SPAWN] Passagem de delta em segundos e checagem de limite máximo
-    const deltaSeconds = delta / 60;
-
-    this.enemySpawner.update(
-      deltaSeconds,
-      this.app.screen.width,
-      this.app.screen.height,
-      this.enemies.length,
-      this.config.maxEnemies,
-      (x, y) => {
-        const isChaser = Math.random() > 0.4;
-        const type: EnemyType = isChaser ? "chaser" : "shooter";
-        const model = isChaser ? "ship_2" : "ship_3";
-        const hp = isChaser
-          ? this.config.chaserHealth
-          : this.config.shooterHealth;
-
-        const enemy = new Enemy(type, model, x, y, hp);
-        this.enemies.push(enemy);
-        this.app.stage.addChild(enemy.container);
-      },
-    );
-
-    for (const enemy of this.enemies) {
-      enemy.update(
-        this.player.container.x,
-        this.player.container.y,
-        delta,
-        (x, y, angle) => this.spawnEnemyProjectile(x, y, angle),
-      );
-
-      const enemyObj = {
-        x: enemy.container.x,
-        y: enemy.container.y,
-        speed: (enemy as unknown as EntityWithSpeed).speed || 0,
-        radius: 22,
+    if (runtimeParams.e2e) registerTestApi(this);
+    if (this.perf) {
+      const probe = this.perf;
+      window.__PIRATE_PERF__ = {
+        reset: () => probe.reset(),
+        getReport: () => probe.report(),
       };
+    }
 
-      for (const island of this.islandsData) {
-        if (
-          checkIslandCollision(enemyObj.x, enemyObj.y, enemyObj.radius, island)
-        ) {
-          resolveIslandCollision(enemyObj, island);
-          enemy.container.x = enemyObj.x;
-          enemy.container.y = enemyObj.y;
-        }
+    this.emitInitialState();
+  }
+
+  /** Releases everything. Idempotent and safe at any lifecycle point. */
+  public destroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.status = "destroyed";
+
+    unregisterTestApi();
+    if (window.__PIRATE_PERF__) delete window.__PIRATE_PERF__;
+
+    window.removeEventListener("blur", this.handleBlur);
+    document.removeEventListener("visibilitychange", this.handleVisibility);
+    this.input.destroy();
+    soundManager.stopAllLoops();
+
+    if (this.appReady) {
+      this.appReady = false;
+      this.app.ticker.remove(this.onTick);
+      this.app.renderer.off("resize", this.layout);
+      this.effects.clear();
+      this.enemies = [];
+      this.projectiles = [];
+      this.player = null;
+      // Destroys the whole scene graph; shared textures stay cached.
+      this.app.destroy({ removeView: true }, { children: true });
+    }
+  }
+
+  /* ------------------------------------------------------------------------ */
+  /* [PAUSE]                                                                  */
+  /* ------------------------------------------------------------------------ */
+
+  public pause(reason: PauseReason = "manual"): void {
+    if (this.status !== "running") return;
+    this.status = "paused";
+    this.input.setEnabled(false); // clears held keys/buttons
+    soundManager.stopAllLoops();
+    soundManager.play("game_pause");
+    this.callbacks.onPauseChange?.(true, reason);
+  }
+
+  /** Only called from an explicit player action (button / key). */
+  public resume(): void {
+    if (this.status !== "paused") return;
+    this.status = "running";
+    this.accumulator = 0; // never "catch up" the paused period
+    this.input.reset();
+    this.input.setEnabled(true);
+    soundManager.play("game_resume");
+    this.startAudioLoops();
+    this.callbacks.onPauseChange?.(false, null);
+  }
+
+  public togglePause(): void {
+    if (this.status === "paused") this.resume();
+    else this.pause("manual");
+  }
+
+  /** Touch controls forward their presses here. */
+  public setVirtualInput(action: GameAction, pressed: boolean): void {
+    this.input.setVirtual(action, pressed);
+  }
+
+  public getStatus(): EngineStatus {
+    return this.status;
+  }
+
+  private handleBlur = () => this.pause("blur");
+
+  private handleVisibility = () => {
+    if (document.hidden) this.pause("hidden");
+  };
+
+  /* ------------------------------------------------------------------------ */
+  /* [SCENE]                                                                  */
+  /* ------------------------------------------------------------------------ */
+
+  private buildScene() {
+    const { width, height } = this.config.arena;
+
+    // Clip everything to the arena rectangle (letterboxing outside it).
+    const mask = new Graphics().rect(0, 0, width, height).fill(0xffffff);
+    this.world.addChild(mask);
+    this.world.mask = mask;
+
+    const water = new TilingSprite({
+      texture: getTexture("water_tile"),
+      width,
+      height,
+    });
+    this.world.addChild(water);
+
+    const islandLayer = new Container();
+    this.world.addChild(islandLayer);
+    for (const island of ISLANDS) {
+      islandLayer.addChild(this.buildIsland(island));
+      this.islands.push({ x: island.x, y: island.y, radius: island.radius });
+    }
+
+    this.world.addChild(this.shipLayer, this.projectileLayer, this.effects.layer);
+    this.app.stage.addChild(this.world);
+
+    this.player = new Player(
+      this.nextEntityId++,
+      this.config,
+      PLAYER_START.x,
+      PLAYER_START.y,
+    );
+    this.shipLayer.addChild(this.player.visual.view);
+  }
+
+  private buildIsland(def: IslandDefinition): Container {
+    const group = new Container();
+    group.position.set(def.x, def.y);
+
+    const rows = def.grid.length;
+    const cols = def.grid[0].length;
+    const startX = -(cols * TILE_SIZE) / 2 + TILE_SIZE / 2;
+    const startY = -(rows * TILE_SIZE) / 2 + TILE_SIZE / 2;
+
+    def.grid.forEach((row, rowIndex) => {
+      row.forEach((alias, colIndex) => {
+        const tile = new Sprite(getTexture(alias));
+        tile.anchor.set(0.5);
+        tile.width = TILE_SIZE;
+        tile.height = TILE_SIZE;
+        tile.position.set(startX + colIndex * TILE_SIZE, startY + rowIndex * TILE_SIZE);
+        group.addChild(tile);
+      });
+    });
+    return group;
+  }
+
+  /** Scales the fixed arena to fit the screen, preserving its proportions. */
+  private layout = () => {
+    if (!this.appReady) return;
+    const { width, height } = this.config.arena;
+    const screenW = this.app.screen.width;
+    const screenH = this.app.screen.height;
+    const scale = Math.min(screenW / width, screenH / height);
+    this.world.scale.set(scale);
+    this.worldOrigin = {
+      x: (screenW - width * scale) / 2,
+      y: (screenH - height * scale) / 2,
+    };
+    this.world.position.set(this.worldOrigin.x, this.worldOrigin.y);
+  };
+
+  /* ------------------------------------------------------------------------ */
+  /* [MAIN LOOP]                                                              */
+  /* ------------------------------------------------------------------------ */
+
+  private onTick = (ticker: Ticker) => {
+    const frameSeconds = ticker.deltaMS / 1000;
+
+    if (!this.manualClock) {
+      this.advance(Math.min(frameSeconds, MAX_FRAME_DT));
+    }
+    this.render(this.manualClock ? 0 : frameSeconds);
+
+    if (this.perf && this.status === "running") {
+      this.perf.record(ticker.deltaMS, this.countEntities());
+    }
+  };
+
+  /** Test hook: advances the simulation by `ms` in fixed steps. */
+  public step(ms: number): void {
+    this.advance(ms / 1000, Number.POSITIVE_INFINITY);
+    this.render(ms / 1000);
+  }
+
+  public isManualClock(): boolean {
+    return this.manualClock;
+  }
+
+  /** Consumes `dt` seconds using fixed simulation steps. */
+  private advance(dt: number, maxSteps = MAX_STEPS_PER_FRAME) {
+    if (this.status !== "running") return;
+
+    this.accumulator += dt;
+    let steps = 0;
+    while (this.accumulator >= FIXED_STEP - 1e-9 && steps < maxSteps) {
+      this.simulate(FIXED_STEP);
+      this.accumulator -= FIXED_STEP;
+      steps++;
+      if (this.status !== "running") break;
+    }
+    if (steps >= maxSteps) this.accumulator = 0;
+  }
+
+  /* ------------------------------------------------------------------------ */
+  /* [SIMULATION STEP]                                                        */
+  /* ------------------------------------------------------------------------ */
+
+  private simulate(dt: number) {
+    const player = this.player;
+    if (!player) return;
+
+    this.stepCount++;
+    this.elapsed += dt;
+    this.timeRemaining = Math.max(0, this.config.gameDuration - this.elapsed);
+
+    /* 1. Player: movement, island/arena limits, weapons */
+    const actions = this.input.getActions();
+    player.update(dt, actions);
+    this.resolveIslands(player);
+    for (const spec of player.collectShots(actions)) this.spawnProjectile(spec);
+    this.updateSailingSound(player);
+
+    /* 2. Spawns */
+    const alive = this.enemies.filter((e) => e.alive);
+    const request = this.spawner.update(dt, {
+      playerX: player.x,
+      playerY: player.y,
+      aliveEnemies: alive,
+      islands: this.islands,
+    });
+    if (request) this.spawnEnemy(request.type, request.x, request.y);
+
+    /* 3. Enemies: AI, island limits, shooting, Chaser impact */
+    for (const enemy of this.enemies) {
+      const shot = enemy.update(dt, {
+        playerX: player.x,
+        playerY: player.y,
+        islands: this.islands,
+        arena: this.config.arena,
+      });
+      if (shot) this.spawnProjectile(shot);
+      if (!enemy.alive) continue;
+
+      this.resolveIslands(enemy);
+      if (enemy.type === "chaser" && circlesOverlap(enemy, player)) {
+        this.chaserImpact(enemy);
       }
     }
 
-    for (let i = this.projectiles.length - 1; i >= 0; i--) {
-      const p = this.projectiles[i];
-      for (const island of this.islandsData) {
-        if (checkIslandCollision(p.container.x, p.container.y, 4, island)) {
-          p.isDead = true;
-          this.createHitEffect(p.container.x, p.container.y);
+    /* 4. Projectiles: movement and collisions */
+    this.updateProjectiles(dt);
+
+    /* 5. Cleanup of dead entities */
+    this.cleanup();
+
+    /* 6. Effects + camera shake (frozen while paused, driven by sim time) */
+    this.effects.update(dt);
+    this.cameraShake = Math.max(0, this.cameraShake - dt);
+
+    /* 7. End conditions and UI notifications */
+    this.emitTime();
+    if (player.health <= 0) this.pendingEnd = "player_sunk";
+    else if (this.timeRemaining <= 0) this.pendingEnd ??= "time_expired";
+    if (this.pendingEnd) this.endMatch(this.pendingEnd);
+  }
+
+  private updateProjectiles(dt: number) {
+    const player = this.player;
+    if (!player) return;
+    const { width, height } = this.config.arena;
+
+    for (const projectile of this.projectiles) {
+      projectile.update(dt);
+      if (projectile.consumed) continue;
+
+      // Islands block every projectile.
+      const hitIsland = this.islands.some((island) =>
+        circlesOverlap(projectile, island),
+      );
+      if (hitIsland) {
+        projectile.consume();
+        this.effects.splash(projectile.x, projectile.y);
+        this.playWaterHit(projectile, 0.35);
+        continue;
+      }
+
+      if (projectile.owner === "player") {
+        for (const enemy of this.enemies) {
+          if (!enemy.alive || !circlesOverlap(projectile, enemy)) continue;
+          projectile.consume(); // damage is applied exactly once
+          this.damageEnemy(enemy, projectile);
           break;
         }
+      } else if (circlesOverlap(projectile, player)) {
+        projectile.consume();
+        this.effects.hit(projectile.x, projectile.y);
+        soundManager.playRandom(["ship_wood_hit_1", "ship_wood_hit_2"]);
+        this.damagePlayer(projectile.damage);
       }
-    }
 
-    for (let i = this.enemyProjectiles.length - 1; i >= 0; i--) {
-      const ep = this.enemyProjectiles[i];
-      for (const island of this.islandsData) {
-        if (checkIslandCollision(ep.container.x, ep.container.y, 4, island)) {
-          ep.isDead = true;
-          this.createHitEffect(ep.container.x, ep.container.y);
-          break;
+      // Expired in the water (not consumed): small splash feedback.
+      if (!projectile.consumed && projectile.expired) {
+        if (!projectile.isOutside(width, height, 0)) {
+          this.effects.splash(projectile.x, projectile.y);
         }
-      }
-    }
-
-    for (let i = this.projectiles.length - 1; i >= 0; i--) {
-      const p = this.projectiles[i];
-      for (let j = this.enemies.length - 1; j >= 0; j--) {
-        const e = this.enemies[j];
-        if (!e.isDying && checkCollision(p.container, e.container, 32)) {
-          p.isDead = true;
-          e.takeDamage(25);
-          soundManager.playSFX("hit");
-          this.createHitEffect(p.container.x, p.container.y);
-
-          if (e.health <= 0) {
-            soundManager.playSFX("explosion");
-            if (e.type === "shooter") {
-              this.addScore(100);
-            }
-          }
-          break;
-        }
-      }
-    }
-
-    for (let i = this.enemyProjectiles.length - 1; i >= 0; i--) {
-      const ep = this.enemyProjectiles[i];
-      if (checkCollision(ep.container, this.player.container, 28)) {
-        ep.isDead = true;
-        soundManager.playSFX("hit");
-        this.damagePlayer(this.config.shooterDamage);
-        this.createHitEffect(ep.container.x, ep.container.y);
-      }
-    }
-
-    for (let j = this.enemies.length - 1; j >= 0; j--) {
-      const e = this.enemies[j];
-      if (
-        !e.isDying &&
-        checkCollision(e.container, this.player.container, 35)
-      ) {
-        if (e.type === "chaser") {
-          e.triggerDeath();
-          soundManager.playSFX("explosion");
-          this.damagePlayer(this.config.chaserDamage);
-          this.createHitEffect(e.container.x, e.container.y);
-        }
-      }
-    }
-
-    for (let i = this.projectiles.length - 1; i >= 0; i--) {
-      const p = this.projectiles[i];
-      p.update(delta, this.app.screen.width, this.app.screen.height);
-      if (p.isDead) {
-        this.app.stage.removeChild(p.container);
-        p.container.destroy();
-        this.projectiles.splice(i, 1);
-      }
-    }
-
-    for (let i = this.enemyProjectiles.length - 1; i >= 0; i--) {
-      const ep = this.enemyProjectiles[i];
-      ep.update(delta, this.app.screen.width, this.app.screen.height);
-      if (ep.isDead) {
-        this.app.stage.removeChild(ep.container);
-        ep.container.destroy();
-        this.enemyProjectiles.splice(i, 1);
-      }
-    }
-
-    for (let i = this.enemies.length - 1; i >= 0; i--) {
-      const e = this.enemies[i];
-      if (e.isDead) {
-        this.app.stage.removeChild(e.container);
-        e.container.destroy();
-        this.enemies.splice(i, 1);
+        this.playWaterHit(projectile, 0.2);
       }
     }
   }
 
-  private updateTimer(delta: number) {
-    const secondsPassed = delta / 60;
-    this.timeRemaining -= secondsPassed;
+  private damageEnemy(enemy: Enemy, projectile: Projectile) {
+    if (this.pendingEnd) return;
+    enemy.takeDamage(projectile.damage);
+    this.effects.hit(projectile.x, projectile.y);
+    this.effects.damageNumber(enemy.x, enemy.y, projectile.damage, 0xffd166);
+    soundManager.playRandom(["ship_wood_hit_1", "ship_wood_hit_2"], {
+      throttleMs: 40,
+    });
 
-    if (this.timeRemaining <= 0) {
-      this.timeRemaining = 0;
-      this.callbacks.onTimeChange?.(0);
-      this.endGame(true);
-      return;
-    }
-
-    this.callbacks.onTimeChange?.(Math.ceil(this.timeRemaining));
+    if (enemy.health <= 0) this.destroyEnemy(enemy, true);
   }
 
-  private addScore(points: number) {
-    this.score += points;
-    this.callbacks.onScoreChange?.(this.score);
+  /** A Chaser reached the player: damages it and explodes (no score). */
+  private chaserImpact(enemy: Enemy) {
+    this.destroyEnemy(enemy, false);
+    soundManager.play("ship_collision");
+    this.damagePlayer(this.config.chaser.contactDamage);
+  }
+
+  /**
+   * Removes an enemy from the simulation immediately (no damage, shots or
+   * collisions afterwards). Only enemies destroyed by the player's attacks
+   * score; a Chaser blowing itself up on the player does not.
+   */
+  private destroyEnemy(enemy: Enemy, byPlayer: boolean) {
+    if (!enemy.alive) return;
+    enemy.destroyShip();
+    this.effects.explosion(enemy.x, enemy.y, enemy.type === "shooter" ? 1.15 : 0.95);
+    soundManager.playRandom(["ship_explosion_1", "ship_explosion_2"]);
+
+    if (byPlayer && !this.pendingEnd) {
+      this.kills++;
+      this.score++;
+      soundManager.play("score_point");
+      this.callbacks.onScoreChange?.(this.score);
+    }
   }
 
   private damagePlayer(amount: number) {
-    if (!this.player) return;
-    this.playerHealth = Math.max(0, this.playerHealth - amount);
-    this.callbacks.onHealthChange?.(
-      this.playerHealth,
-      this.config.playerMaxHealth,
-    );
+    const player = this.player;
+    if (!player || this.pendingEnd) return;
 
-    if (this.playerHealth <= 0) {
-      this.endGame(false);
+    player.takeDamage(amount);
+    this.effects.damageNumber(player.x, player.y, amount, 0xff6b6b);
+    this.cameraShake = 0.22;
+    this.callbacks.onHealthChange?.(player.health, player.maxHealth);
+
+    const ratio = player.health / player.maxHealth;
+    if (ratio <= LOW_HEALTH_RATIO && ratio > 0 && !this.lowHealthPlayed) {
+      this.lowHealthPlayed = true;
+      soundManager.play("health_low");
+    }
+    if (player.health <= 0) this.pendingEnd = "player_sunk";
+  }
+
+  /* ------------------------------------------------------------------------ */
+  /* [ENTITY HELPERS]                                                         */
+  /* ------------------------------------------------------------------------ */
+
+  private spawnProjectile(spec: ProjectileSpec) {
+    const projectile = new Projectile(this.nextEntityId++, spec);
+    this.projectiles.push(projectile);
+    this.projectileLayer.addChild(projectile.view);
+
+    this.effects.muzzleFlash(spec.x, spec.y);
+    if (spec.weapon === "front") {
+      soundManager.playRandom(
+        ["cannon_fire_1", "cannon_fire_2", "cannon_fire_3"],
+        { throttleMs: 60 },
+      );
+    } else if (spec.weapon === "broadside") {
+      soundManager.play("cannon_broadside", { throttleMs: 120 });
+    } else {
+      soundManager.play("cannon_fire_2", { volume: 0.4, throttleMs: 60 });
     }
   }
 
-  private endGame(survived: boolean) {
-    if (this.isGameOver) return;
-    this.isGameOver = true;
-    soundManager.stopBGM();
-    this.callbacks.onGameOver?.(this.score, survived);
+  private spawnEnemy(type: EnemyType, x: number, y: number): Enemy {
+    const player = this.player;
+    const heading = player ? Math.atan2(player.y - y, player.x - x) : 0;
+    const enemy = new Enemy(this.nextEntityId++, type, this.config, x, y, heading);
+    this.enemies.push(enemy);
+    this.shipLayer.addChild(enemy.visual.view);
+    return enemy;
   }
 
-  private fireFrontalCannon() {
-    if (!this.player) return;
-    soundManager.playSFX("shoot");
-
-    const shipRot = this.player.container.rotation;
-    const forwardAngle = shipRot + Math.PI / 2;
-
-    const spawnX = this.player.container.x + Math.cos(forwardAngle) * 25;
-    const spawnY = this.player.container.y + Math.sin(forwardAngle) * 25;
-
-    const projectile = new Projectile(spawnX, spawnY, forwardAngle, 10);
-    this.projectiles.push(projectile);
-    this.app.stage.addChild(projectile.container);
+  private resolveIslands(entity: { x: number; y: number; radius: number }) {
+    for (const island of this.islands) {
+      if (resolveIslandCollision(entity, island) && entity instanceof Player) {
+        entity.speed *= 0.3;
+      }
+    }
   }
 
-  private fireBroadsideCannon(side: "left" | "right") {
-    if (!this.player) return;
-    soundManager.playSFX("shoot");
+  private cleanup() {
+    const { width, height } = this.config.arena;
 
-    const shipRot = this.player.container.rotation;
-    const forwardAngle = shipRot + Math.PI / 2;
+    this.projectiles = this.projectiles.filter((projectile) => {
+      const remove =
+        projectile.consumed ||
+        projectile.expired ||
+        projectile.isOutside(width, height);
+      if (remove) projectile.destroy();
+      return !remove;
+    });
 
-    const sideAngle =
-      side === "left" ? forwardAngle - Math.PI / 2 : forwardAngle + Math.PI / 2;
-
-    const sideDistance = 18;
-    const sideX = Math.cos(sideAngle) * sideDistance;
-    const sideY = Math.sin(sideAngle) * sideDistance;
-
-    const offsets = [-16, 0, 16];
-
-    offsets.forEach((offset) => {
-      const spawnX =
-        this.player!.container.x + sideX + Math.cos(forwardAngle) * offset;
-      const spawnY =
-        this.player!.container.y + sideY + Math.sin(forwardAngle) * offset;
-
-      const projectile = new Projectile(spawnX, spawnY, sideAngle, 8.5);
-      this.projectiles.push(projectile);
-      this.app.stage.addChild(projectile.container);
+    this.enemies = this.enemies.filter((enemy) => {
+      if (enemy.removable) enemy.destroy();
+      return !enemy.removable;
     });
   }
 
-  private spawnEnemyProjectile(x: number, y: number, angle: number) {
-    soundManager.playSFX("shoot");
-    const projectile = new Projectile(x, y, angle, 7.5);
-    projectile.isEnemy = true;
-    this.enemyProjectiles.push(projectile);
-    this.app.stage.addChild(projectile.container);
+  /* ------------------------------------------------------------------------ */
+  /* [RENDER]                                                                 */
+  /* ------------------------------------------------------------------------ */
+
+  /** Pushes the simulation state into Pixi. `dt` drives visual-only animation. */
+  private render(dt: number) {
+    const player = this.player;
+    if (!player) return;
+
+    player.syncView(dt);
+    for (const enemy of this.enemies) enemy.syncView(dt);
+    for (const projectile of this.projectiles) projectile.syncView();
+
+    // Camera shake offsets the whole world for a few frames after a hit.
+    const shake = this.cameraShake > 0 ? this.cameraShake * 30 : 0;
+    this.world.position.set(
+      this.worldOrigin.x + (shake ? (Math.random() - 0.5) * shake : 0),
+      this.worldOrigin.y + (shake ? (Math.random() - 0.5) * shake : 0),
+    );
   }
 
-  private createHitEffect(x: number, y: number) {
-    try {
-      const effect = Sprite.from("explosion_effect");
-      effect.anchor.set(0.5);
-      effect.scale.set(0.4);
-      effect.x = x;
-      effect.y = y;
+  /* ------------------------------------------------------------------------ */
+  /* [UI NOTIFICATIONS & AUDIO CUES]                                          */
+  /* ------------------------------------------------------------------------ */
 
-      this.app.stage.addChild(effect);
+  private emitInitialState() {
+    const player = this.player;
+    if (!player) return;
+    this.callbacks.onHealthChange?.(player.health, player.maxHealth);
+    this.callbacks.onScoreChange?.(this.score);
+    this.emitTime();
+  }
 
-      let life = 15;
-      const tickerCallback = (time: Ticker) => {
-        life -= time.deltaTime;
-        effect.scale.set(0.4 + (15 - life) * 0.02);
-        effect.alpha = life / 15;
+  /** Notifies React only when the displayed whole second changes. */
+  private emitTime() {
+    const seconds = Math.ceil(this.timeRemaining);
+    if (seconds === this.lastEmittedSecond) return;
+    this.lastEmittedSecond = seconds;
+    this.callbacks.onTimeChange?.(seconds);
 
-        if (life <= 0) {
-          this.app.stage.removeChild(effect);
-          effect.destroy();
-          this.app.ticker.remove(tickerCallback);
-        }
-      };
-
-      this.app.ticker.add(tickerCallback);
-    } catch (e) {
-      console.warn("Efeito de explosão indisponível.", e);
+    if (
+      seconds === TIME_WARNING_SECONDS &&
+      !this.timeWarningPlayed &&
+      this.config.gameDuration > TIME_WARNING_SECONDS
+    ) {
+      this.timeWarningPlayed = true;
+      soundManager.play("time_warning");
     }
   }
 
-  public destroy() {
-    this.isDestroyed = true;
-    soundManager.stopBGM();
-    this.removeEventListeners();
-    this.inputManager.destroy();
+  private startAudioLoops() {
+    soundManager.startLoop("ocean_ambience_loop", 0.25);
+    soundManager.startLoop("ship_sailing_loop", 0);
+  }
 
-    this.projectiles.forEach((p) => p.container.destroy());
-    this.projectiles = [];
+  /** Sailing loop volume follows the ship speed (updated a few times/second). */
+  private updateSailingSound(player: Player) {
+    if (this.stepCount % 6 !== 0) return;
+    const ratio = Math.min(1, Math.abs(player.speed) / this.config.player.maxSpeed);
+    soundManager.setLoopVolume("ship_sailing_loop", ratio * 0.45);
+  }
 
-    this.enemyProjectiles.forEach((ep) => ep.container.destroy());
-    this.enemyProjectiles = [];
+  private playWaterHit(projectile: Projectile, volume: number) {
+    // Enemy shots that miss are frequent: only the player's feed back loudly.
+    soundManager.playRandom(["cannonball_water_hit_1", "cannonball_water_hit_2"], {
+      volume: projectile.owner === "player" ? volume : volume * 0.5,
+      throttleMs: 80,
+    });
+  }
 
-    this.enemies.forEach((e) => e.container.destroy());
-    this.enemies = [];
+  /* ------------------------------------------------------------------------ */
+  /* [MATCH END]                                                              */
+  /* ------------------------------------------------------------------------ */
 
-    if (this.isInitialized) {
-      this.app.destroy({ removeView: true });
+  private endMatch(reason: EndReason) {
+    if (this.status === "over" || this.status === "destroyed") return;
+    this.status = "over";
+    this.input.setEnabled(false);
+    soundManager.stopAllLoops();
+
+    if (reason === "player_sunk") {
+      soundManager.play("ship_sinking");
+      soundManager.play("game_over", { volume: 0.8 });
+    } else {
+      soundManager.play("game_complete");
     }
+
+    const snapshot: ConfigSnapshot = {
+      sessionTimeSec: this.config.gameDuration,
+      spawnIntervalMs: Math.round(this.config.spawn.intervalSec * 1000),
+    };
+    this.result = {
+      matchId: this.matchId,
+      reason,
+      score: this.score,
+      durationSeconds:
+        reason === "time_expired"
+          ? this.config.gameDuration
+          : Math.round(this.elapsed * 10) / 10,
+      kills: this.kills,
+      endedAt: new Date().toISOString(),
+      config: snapshot,
+    };
+    this.callbacks.onGameOver?.(this.result);
+  }
+
+  /* ------------------------------------------------------------------------ */
+  /* [TEST / DEBUG API]                                                       */
+  /* ------------------------------------------------------------------------ */
+
+  public getSnapshot(): EngineSnapshot {
+    const player = this.player;
+    const zeroPlayer = {
+      x: 0,
+      y: 0,
+      heading: 0,
+      speed: 0,
+      health: 0,
+      maxHealth: this.config.player.maxHealth,
+      cooldowns: { front: 0, left: 0, right: 0 },
+    };
+
+    return {
+      status: this.status,
+      seed: this.seed,
+      matchId: this.matchId,
+      timeRemaining: Number(this.timeRemaining.toFixed(3)),
+      elapsed: Number(this.elapsed.toFixed(3)),
+      score: this.score,
+      arena: { ...this.config.arena },
+      islands: this.islands.map((island) => ({ ...island })),
+      player: player
+        ? {
+            x: player.x,
+            y: player.y,
+            heading: player.heading,
+            speed: player.speed,
+            health: player.health,
+            maxHealth: player.maxHealth,
+            cooldowns: { ...player.cooldowns },
+          }
+        : zeroPlayer,
+      enemies: this.enemies.map((enemy) => ({
+        id: enemy.id,
+        type: enemy.type,
+        x: enemy.x,
+        y: enemy.y,
+        health: enemy.health,
+        alive: enemy.alive,
+      })),
+      projectiles: {
+        player: this.projectiles.filter((p) => p.owner === "player").length,
+        enemy: this.projectiles.filter((p) => p.owner === "enemy").length,
+      },
+      counts: {
+        enemiesAlive: this.enemies.filter((e) => e.alive).length,
+        effects: this.effects.activeCount,
+        spawned: this.spawner.totalSpawned,
+      },
+      result: this.result,
+    };
+  }
+
+  public debugSpawnEnemy(type: EnemyType, x: number, y: number): number {
+    return this.spawnEnemy(type, x, y).id;
+  }
+
+  public debugTeleportPlayer(x: number, y: number, heading?: number): void {
+    if (!this.player) return;
+    this.player.x = x;
+    this.player.y = y;
+    this.player.speed = 0;
+    if (heading !== undefined) this.player.heading = heading;
+  }
+
+  public debugSetPlayerHealth(health: number): void {
+    const player = this.player;
+    if (!player) return;
+    player.health = Math.max(0, Math.min(player.maxHealth, health));
+    this.callbacks.onHealthChange?.(player.health, player.maxHealth);
+  }
+
+  private countEntities(): number {
+    return (
+      1 +
+      this.enemies.length +
+      this.projectiles.length +
+      this.effects.activeCount
+    );
   }
 }

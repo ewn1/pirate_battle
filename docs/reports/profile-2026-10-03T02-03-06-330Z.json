@@ -1,0 +1,78 @@
+{
+  "generatedAt": "2026-10-03T02:03:06.330Z",
+  "environment": {
+    "cpu": "Intel(R) Core(TM) i7-10700F CPU @ 2.90GHz",
+    "cores": 16,
+    "memoryGB": 7.7,
+    "platform": "Linux 6.18.40.1-microsoft-standard-WSL2",
+    "browser": "Chromium 153.0.8010.12",
+    "headless": true,
+    "viewport": {
+      "width": 1280,
+      "height": 720
+    },
+    "base": "http://localhost:4173"
+  },
+  "config": {
+    "sessionTimeSec": 180,
+    "spawnIntervalMs": 1000
+  },
+  "fpsSeconds": 180,
+  "cycles": 5,
+  "fps": {
+    "frames": 2858,
+    "durationMs": 172877,
+    "avgFps": 16.5,
+    "avgFrameMs": 60.49,
+    "p95FrameMs": 100,
+    "p99FrameMs": 100,
+    "maxFrameMs": 100,
+    "framesOver20ms": 2518,
+    "entities": {
+      "avg": 24.3,
+      "max": 36
+    },
+    "usedJSHeapMB": 12.1
+  },
+  "memory": {
+    "samples": [
+      {
+        "label": "baseline (menu)",
+        "jsHeapMB": 4.51,
+        "domNodes": 121,
+        "jsEventListeners": 167
+      },
+      {
+        "label": "after cycle 1",
+        "jsHeapMB": 7.62,
+        "domNodes": 195,
+        "jsEventListeners": 221
+      },
+      {
+        "label": "after cycle 2",
+        "jsHeapMB": 7.85,
+        "domNodes": 195,
+        "jsEventListeners": 221
+      },
+      {
+        "label": "after cycle 3",
+        "jsHeapMB": 8.02,
+        "domNodes": 195,
+        "jsEventListeners": 221
+      },
+      {
+        "label": "after cycle 4",
+        "jsHeapMB": 8.17,
+        "domNodes": 195,
+        "jsEventListeners": 221
+      },
+      {
+        "label": "after cycle 5",
+        "jsHeapMB": 8.34,
+        "domNodes": 195,
+        "jsEventListeners": 221
+      }
+    ],
+    "canvasesLeftOnMenu": 0
+  }
+}

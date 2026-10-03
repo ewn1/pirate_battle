@@ -11,6 +11,18 @@ node_modules
 dist
 dist-ssr
 *.local
+.env
+.env.local
+
+# Playwright (the saved copy lives in docs/reports)
+/playwright-report/
+/test-results/
+/blob-report/
+/playwright/.cache/
+
+# Windows download markers that came with the asset pack
+*:Zone.Identifier
+*.Identifier
 
 # Editor directories and files
 .vscode/*

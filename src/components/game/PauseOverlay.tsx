@@ -1,123 +1,79 @@
-import React from "react";
+/**
+ * [PAUSE OVERLAY]
+ * Modal dialog shown while the match is paused (manually, or automatically
+ * when the window loses focus / the tab is hidden). The match only continues
+ * after an explicit player action (Resume).
+ */
+import { useRef } from "react";
 import styled from "styled-components";
+import type { PauseReason } from "../../game/core/types";
+import { useDialogFocus } from "../../hooks/useDialogFocus";
+import { Button } from "../ui/Button";
+import { Overlay } from "../ui/Overlay";
+import { Panel, PanelText, PanelTitle } from "../ui/Panel";
 
 interface PauseOverlayProps {
+  reason: PauseReason | null;
   onResume: () => void;
   onRestart: () => void;
   onMainMenu: () => void;
 }
 
-export const PauseOverlay: React.FC<PauseOverlayProps> = ({
-  onResume,
-  onRestart,
-  onMainMenu,
-}) => {
-  return (
-    <OverlayContainer role="dialog" aria-label="Pause Menu">
-      <ModalPanel>
-        <Title>GAME PAUSED</Title>
-        <Subtitle>Simulation, timers, and cooldowns are suspended.</Subtitle>
-
-        <MenuButton onClick={onResume} aria-label="Resume Game">
-          <ButtonIcon
-            src="/assets/png/default/ui/controls/icon_play.png"
-            alt=""
-          />
-          RESUME
-        </MenuButton>
-
-        <MenuButton onClick={onRestart} aria-label="Restart Match">
-          <ButtonIcon
-            src="/assets/png/default/ui/controls/icon_restart.png"
-            alt=""
-          />
-          RESTART
-        </MenuButton>
-
-        <MenuButton onClick={onMainMenu} aria-label="Return to Main Menu">
-          <ButtonIcon
-            src="/assets/png/default/ui/controls/icon_home.png"
-            alt=""
-          />
-          MAIN MENU
-        </MenuButton>
-      </ModalPanel>
-    </OverlayContainer>
-  );
+const REASON_TEXT: Record<PauseReason, string> = {
+  manual: "Ready when you are, captain.",
+  blur: "Paused automatically: the window lost focus.",
+  hidden: "Paused automatically: the tab was hidden.",
 };
 
-const OverlayContainer = styled.div`
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  background-color: rgba(0, 0, 0, 0.65);
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  z-index: 100;
-  backdrop-filter: blur(4px);
-`;
-
-const ModalPanel = styled.div`
-  background-image: url("/assets/png/default/ui/menu/panel_menu.png");
-  background-size: 100% 100%;
-  width: 360px;
-  padding: 32px 24px;
+const Buttons = styled.div`
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 16px;
-  color: #fff;
-  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
-  border-radius: 8px;
+  gap: 4px;
+  width: 100%;
 `;
 
-const Title = styled.h2`
-  margin: 0;
-  font-size: 28px;
-  color: #f8e3a1;
-  text-shadow: 2px 2px 4px #000;
-`;
+export function PauseOverlay({
+  reason,
+  onResume,
+  onRestart,
+  onMainMenu,
+}: PauseOverlayProps) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef);
 
-const Subtitle = styled.p`
-  margin: 4px 0 16px 0;
-  font-size: 14px;
-  color: #ddd;
-  text-align: center;
-`;
-
-const MenuButton = styled.button`
-  width: 80%;
-  padding: 12px 16px;
-  background-color: #3a2312;
-  border: 2px solid #8b5a2b;
-  border-radius: 6px;
-  color: #f8e3a1;
-  font-weight: bold;
-  font-size: 16px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  text-shadow: 1px 1px 2px #000;
-  transition:
-    transform 0.1s,
-    background-color 0.2s;
-
-  &:hover {
-    background-color: #4a2f18;
-    transform: scale(1.02);
-  }
-
-  &:active {
-    transform: scale(0.98);
-  }
-`;
-
-const ButtonIcon = styled.img`
-  width: 20px;
-  height: 20px;
-`;
+  return (
+    <Overlay>
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="pause-title"
+        aria-describedby="pause-text"
+        style={{ width: "min(94vw, 400px)" }}
+        data-testid="pause-dialog"
+      >
+        <Panel>
+          <PanelTitle id="pause-title" as="h2">
+            Paused
+          </PanelTitle>
+          <PanelText id="pause-text">
+            {REASON_TEXT[reason ?? "manual"]} Timers, cooldowns and enemies are
+            frozen.
+          </PanelText>
+          <Buttons>
+            <Button type="button" onClick={onResume} data-autofocus data-testid="resume-button">
+              Resume
+            </Button>
+            <Button type="button" onClick={onRestart} data-testid="restart-button">
+              Restart
+            </Button>
+            <Button type="button" onClick={onMainMenu} data-sound="back" data-testid="menu-button">
+              Main menu
+            </Button>
+          </Buttons>
+        </Panel>
+      </div>
+    </Overlay>
+  );
+}

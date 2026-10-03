@@ -1,162 +1,270 @@
-import { http, HttpResponse } from "msw";
+/**
+ * [MSW HANDLERS]
+ * REST mock of the ranking and history APIs. Contracts come from
+ * `services/api/contracts.ts`; fixtures from `fixtures.ts`; persistence from
+ * `db.ts`. The same handlers run in development, tests and the deployed build.
+ *
+ * Behaviour is driven by the active scenario (see `mockControl.ts`).
+ * Latency is seeded (`?mockSeed=`) and scalable (`?latencyScale=0` in tests).
+ */
+import { delay, http, HttpResponse, passthrough } from "msw";
+import { Rng } from "../../game/utils/Random";
+import {
+  DEFAULT_PAGE_SIZE,
+  type MatchRecord,
+  type Page,
+  type RankingEntry,
+  type SubmitMatchResponse,
+} from "../api/contracts";
+import { runtimeParams } from "../runtimeParams";
+import {
+  FAIL_ASSETS_STORAGE_KEY,
+  getScenario,
+  type ScenarioId,
+} from "../mockControl";
+import {
+  allRecords,
+  findRecord,
+  insertRecord,
+  rankRecords,
+  sortHistory,
+} from "./db";
+import { generatePlayerHistory } from "./fixtures";
 
-export interface GameConfigSnapshot {
-  gameTime: number;
-  spawnTime: number;
+/* -------------------------------------------------------------------------- */
+/* [LATENCY]                                                                  */
+/* -------------------------------------------------------------------------- */
+
+const BASE_LATENCY_MS = 120;
+const latencyRng = new Rng(runtimeParams.mockSeed);
+
+type Endpoint = "ranking" | "history" | "submit";
+
+function latencyFor(scenario: ScenarioId, page: number): number {
+  let ms = BASE_LATENCY_MS;
+  if (scenario === "slow") ms = 2500;
+  else if (scenario === "variable-latency") ms = latencyRng.range(100, 1200);
+  else if (scenario === "out-of-order") ms = page <= 1 ? 1200 : 80;
+  return Math.round(ms * runtimeParams.latencyScale);
 }
 
-export interface MatchRecord {
-  id: string;
-  playerId: string;
-  playerName: string;
-  score: number;
-  duration: number;
-  reason: "time_expired" | "player_sunk";
-  survived: boolean;
-  createdAt: string;
-  config: GameConfigSnapshot;
+/* -------------------------------------------------------------------------- */
+/* [FAILURE INJECTION]                                                        */
+/* -------------------------------------------------------------------------- */
+
+function errorBody(code: string, message: string) {
+  return { code, message };
 }
 
-const STORAGE_KEY_HISTORY = "pirate_battle_match_history";
+/**
+ * Returns a failing response for the scenario/endpoint pair, or null when the
+ * request should succeed. "timeout" never resolves, so the client gives up.
+ */
+async function failureFor(
+  scenario: ScenarioId,
+  endpoint: Endpoint,
+): Promise<Response | null> {
+  const short = Math.round(150 * runtimeParams.latencyScale);
 
-const getStoredHistory = (): MatchRecord[] => {
-  const saved = localStorage.getItem(STORAGE_KEY_HISTORY);
-  if (!saved) {
-    const initialHistory: MatchRecord[] = [
-      {
-        id: "m1",
-        playerId: "p1",
-        playerName: "The Codefather",
-        score: 9999,
-        duration: 120,
-        reason: "time_expired",
-        survived: true,
-        createdAt: new Date(Date.now() - 3600000 * 5).toISOString(),
-        config: { gameTime: 120, spawnTime: 3 },
-      },
-      {
-        id: "m2",
-        playerId: "p2",
-        playerName: "Anne Bonny",
-        score: 1800,
-        duration: 95,
-        reason: "time_expired",
-        survived: true,
-        createdAt: new Date(Date.now() - 3600000 * 5).toISOString(),
-        config: { gameTime: 120, spawnTime: 3 },
-      },
-      {
-        id: "m3",
-        playerId: "p3",
-        playerName: "Calico Jack",
-        score: 1500,
-        duration: 80,
-        reason: "time_expired",
-        survived: false,
-        createdAt: new Date(Date.now() - 3600000 * 1).toISOString(),
-        config: { gameTime: 120, spawnTime: 3 },
-      },
-      {
-        id: "m4",
-        playerId: "p4",
-        playerName: "Captain Morgan",
-        score: 1200,
-        duration: 95,
-        reason: "player_sunk",
-        survived: false,
-        createdAt: new Date(Date.now() - 3600000 * 2).toISOString(),
-        config: { gameTime: 120, spawnTime: 3 },
-      },
-    ];
-    localStorage.setItem(STORAGE_KEY_HISTORY, JSON.stringify(initialHistory));
-    return initialHistory;
+  switch (scenario) {
+    case "timeout":
+      await delay("infinite");
+      return null;
+    case "network-error":
+      await delay(short);
+      return HttpResponse.error();
+    case "http-4xx":
+      await delay(short);
+      return HttpResponse.json(errorBody("forbidden", "Access denied."), {
+        status: 403,
+      });
+    case "http-5xx":
+      await delay(short);
+      return HttpResponse.json(
+        errorBody("internal_error", "Something went wrong on the server."),
+        { status: 500 },
+      );
+    case "ranking-fails":
+      if (endpoint !== "ranking") return null;
+      await delay(short);
+      return HttpResponse.json(
+        errorBody("ranking_unavailable", "The ranking is unavailable."),
+        { status: 500 },
+      );
+    case "history-fails":
+      if (endpoint !== "history") return null;
+      await delay(short);
+      return HttpResponse.json(
+        errorBody("history_unavailable", "The match history is unavailable."),
+        { status: 500 },
+      );
+    case "submit-unavailable":
+      if (endpoint !== "submit") return null;
+      await delay(short);
+      return HttpResponse.json(
+        errorBody("registration_unavailable", "Registration is unavailable."),
+        { status: 503, headers: { "Retry-After": "5" } },
+      );
+    default:
+      return null;
   }
-  return JSON.parse(saved);
-};
+}
+
+/* -------------------------------------------------------------------------- */
+/* [HELPERS]                                                                  */
+/* -------------------------------------------------------------------------- */
+
+function intParam(url: URL, name: string, fallback: number, min = 1): number {
+  const value = Number(url.searchParams.get(name));
+  return Number.isInteger(value) && value >= min ? value : fallback;
+}
+
+function paginate<T>(items: T[], page: number, pageSize: number): Page<T> {
+  const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+  const start = (page - 1) * pageSize;
+  return {
+    items: items.slice(start, start + pageSize),
+    page,
+    pageSize,
+    total: items.length,
+    totalPages,
+  };
+}
+
+function isValidRecord(body: unknown): body is MatchRecord {
+  if (typeof body !== "object" || body === null) return false;
+  const r = body as Partial<MatchRecord>;
+  return (
+    typeof r.id === "string" &&
+    r.id.length > 0 &&
+    typeof r.playerId === "string" &&
+    typeof r.playerName === "string" &&
+    typeof r.score === "number" &&
+    Number.isFinite(r.score) &&
+    r.score >= 0 &&
+    typeof r.durationSeconds === "number" &&
+    r.durationSeconds >= 0 &&
+    (r.reason === "time_expired" || r.reason === "player_sunk") &&
+    typeof r.playedAt === "string" &&
+    !Number.isNaN(Date.parse(r.playedAt)) &&
+    typeof r.config?.sessionTimeSec === "number" &&
+    typeof r.config?.spawnIntervalMs === "number"
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* [HANDLERS]                                                                 */
+/* -------------------------------------------------------------------------- */
 
 export const handlers = [
-  // GET /api/leaderboard?page=1&limit=5
-  http.get("/api/leaderboard", ({ request }) => {
+  /* ---- GET /api/ranking ------------------------------------------------- */
+  http.get("/api/ranking", async ({ request }) => {
+    const scenario = getScenario();
     const url = new URL(request.url);
-    const page = Number(url.searchParams.get("page") || 1);
-    const limit = Number(url.searchParams.get("limit") || 5);
+    const page = intParam(url, "page", 1);
+    const pageSize = intParam(url, "pageSize", DEFAULT_PAGE_SIZE);
 
-    const history = getStoredHistory();
+    const failure = await failureFor(scenario, "ranking");
+    if (failure) return failure;
+    await delay(latencyFor(scenario, page));
 
-    // Ordenação por pontuação (maior primeiro) e desempate determinístico por data de criação
-    const sorted = [...history].sort((a, b) => {
-      if (b.score !== a.score) return b.score - a.score;
-      return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-    });
-
-    const ranked = sorted.map((entry, index) => ({
-      ...entry,
-      rank: index + 1,
-    }));
-
-    const startIndex = (page - 1) * limit;
-    const paginated = ranked.slice(startIndex, startIndex + limit);
-    const totalPages = Math.ceil(ranked.length / limit) || 1;
-
-    return HttpResponse.json({
-      items: paginated,
-      total: ranked.length,
-      page,
-      totalPages,
-    });
-  }),
-
-  // GET /api/history?page=1&limit=5
-  http.get("/api/history", ({ request }) => {
-    const url = new URL(request.url);
-    const page = Number(url.searchParams.get("page") || 1);
-    const limit = Number(url.searchParams.get("limit") || 5);
-
-    const history = getStoredHistory();
-    // Ordenar histórico por data mais recente
-    const sorted = [...history].sort(
-      (a, b) =>
-        new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
-    );
-
-    const startIndex = (page - 1) * limit;
-    const paginated = sorted.slice(startIndex, startIndex + limit);
-    const totalPages = Math.ceil(sorted.length / limit) || 1;
-
-    return HttpResponse.json({
-      items: paginated,
-      total: sorted.length,
-      page,
-      totalPages,
-    });
-  }),
-
-  // POST /api/history
-  http.post("/api/history", async ({ request }) => {
-    const body = (await request.json()) as Partial<MatchRecord>;
-    const history = getStoredHistory();
-
-    // Prevenção de duplicatas por ID
-    const existingIndex = history.findIndex((h) => h.id === body.id);
-    if (existingIndex >= 0) {
-      return HttpResponse.json(history[existingIndex], { status: 200 });
+    if (scenario === "empty") {
+      return HttpResponse.json(paginate<RankingEntry>([], page, pageSize));
     }
 
-    const newRecord: MatchRecord = {
-      id: body.id || `m_${Date.now()}`,
-      playerId: body.playerId || "player_local",
-      playerName: body.playerName || "Captain Anonymous",
-      score: body.score ?? 0,
-      duration: body.duration ?? 0,
-      reason: body.reason || "time_expired",
-      survived: body.survived ?? true,
-      createdAt: body.createdAt || new Date().toISOString(),
-      config: body.config || { gameTime: 120, spawnTime: 3 },
-    };
+    const sessionTimeSec = Number(url.searchParams.get("sessionTimeSec"));
+    const spawnIntervalMs = Number(url.searchParams.get("spawnIntervalMs"));
 
-    history.push(newRecord);
-    localStorage.setItem(STORAGE_KEY_HISTORY, JSON.stringify(history));
+    // Only matches played with the same configuration are comparable.
+    const comparable = allRecords().filter(
+      (record) =>
+        record.config.sessionTimeSec === sessionTimeSec &&
+        record.config.spawnIntervalMs === spawnIntervalMs,
+    );
+    const ranked: RankingEntry[] = rankRecords(comparable).map(
+      (record, index) => ({ ...record, rank: index + 1 }),
+    );
+    return HttpResponse.json(paginate(ranked, page, pageSize));
+  }),
 
-    return HttpResponse.json(newRecord, { status: 201 });
+  /* ---- GET /api/history ------------------------------------------------- */
+  http.get("/api/history", async ({ request }) => {
+    const scenario = getScenario();
+    const url = new URL(request.url);
+    const playerId = url.searchParams.get("playerId");
+    const page = intParam(url, "page", 1);
+    const pageSize = intParam(url, "pageSize", DEFAULT_PAGE_SIZE);
+
+    if (!playerId) {
+      return HttpResponse.json(
+        errorBody("missing_player", "playerId is required."),
+        { status: 400 },
+      );
+    }
+
+    const failure = await failureFor(scenario, "history");
+    if (failure) return failure;
+    await delay(latencyFor(scenario, page));
+
+    if (scenario === "empty") {
+      return HttpResponse.json(paginate<MatchRecord>([], page, pageSize));
+    }
+
+    let records = allRecords().filter((record) => record.playerId === playerId);
+    if (scenario === "many-pages") {
+      records = [...records, ...generatePlayerHistory(playerId, "You")];
+    }
+    return HttpResponse.json(paginate(sortHistory(records), page, pageSize));
+  }),
+
+  /* ---- POST /api/history (idempotent) ----------------------------------- */
+  http.post("/api/history", async ({ request }) => {
+    const scenario = getScenario();
+
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      body = null;
+    }
+    if (!isValidRecord(body)) {
+      return HttpResponse.json(
+        errorBody("invalid_payload", "The match record is invalid."),
+        { status: 400 },
+      );
+    }
+
+    const failure = await failureFor(scenario, "submit");
+    if (failure) return failure;
+    await delay(latencyFor(scenario, 1));
+
+    // Same id => same record. No duplicate in history or ranking.
+    const existing = findRecord(body.id);
+    if (existing) {
+      const response: SubmitMatchResponse = { record: existing, duplicate: true };
+      return HttpResponse.json(response, { status: 200 });
+    }
+
+    const { record } = insertRecord(body);
+
+    if (scenario === "timeout-after-register") {
+      // The record IS stored, but the answer never arrives: the client times
+      // out and its retry finds the existing record (duplicate: true).
+      await delay("infinite");
+    }
+
+    const response: SubmitMatchResponse = { record, duplicate: false };
+    return HttpResponse.json(response, { status: 201 });
+  }),
+
+  /* ---- Test-only: make a texture request fail --------------------------- */
+  http.get("/assets/png/default/ships/ship_1.png", () => {
+    let fail = false;
+    try {
+      fail = localStorage.getItem(FAIL_ASSETS_STORAGE_KEY) === "1";
+    } catch {
+      /* storage unavailable */
+    }
+    return fail ? HttpResponse.error() : passthrough();
   }),
 ];
